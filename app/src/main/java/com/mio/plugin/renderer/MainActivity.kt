@@ -27,9 +27,12 @@ class MainActivity : Activity() {
                 Mesa Gallium Freedreno over Android EGL (libEGL_mesa.so),
                 not OSMesa (removed in Mesa 26) and not GL4ES / MobileGlues.
 
-                OpenGL 4.6 is requested via MESA_GL_VERSION_OVERRIDE.
-                The version string Minecraft shows still depends on
-                the Adreno generation and Mesa feature support.
+                No MESA_GL_VERSION_OVERRIDE is forced: Mesa reports the
+                version the Adreno + KGSL stack really supports, which keeps
+                NeoForge/GLFW early display from failing hard.
+
+                If FCL still lists an old copy after updating this app,
+                force-stop FCL so it rescans the plugin.
             """.trimIndent()
         }
         setContentView(ScrollView(this).apply { addView(text) })

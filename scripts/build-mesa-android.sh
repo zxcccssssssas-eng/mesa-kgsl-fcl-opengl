@@ -10,6 +10,9 @@
 #   - never passes unknown options (including -Dosmesa=true)
 #   - builds Android EGL + GLES2 + desktop OpenGL + Freedreno KGSL
 #   - packages libEGL_mesa.so / libGLESv2_mesa.so / libgallium_dri.so
+#   - patches Mesa's android_stub so libcutils/libhardware are linked INTO the
+#     Mesa DSOs instead of left as DT_NEEDED (they are private platform libs
+#     and FCL's JVM classloader namespace cannot resolve them at runtime)
 #
 # Proven flag sources for this Mesa generation:
 #   - Mesa docs/android.rst (NDK: -Dplatforms=android -Dandroid-stub=true
@@ -319,11 +322,149 @@ meson_setup_mesa() {
   return 1
 }
 
+# Mesa's -Dandroid-stub=true builds stub DSOs named libcutils.so /
+# libhardware.so / liblog.so / libnativewindow.so / libsync.so and links them
+# as DT_NEEDED entries. libcutils and libhardware are PRIVATE platform
+# libraries: Android app processes -- including the JVM classloader namespace
+# ("clns-N") that LWJGL uses to dlopen the renderer -- cannot resolve them.
+# The result on device is:
+#   GLFW: Failed to create window context!
+#   UnsatisfiedLinkError: Failed to dynamically load library:
+#     .../libGLESv2_mesa.so(error = null)
+#   dlopen failed: library "libcutils.so" not found: needed by
+#     .../libgallium_dri.so in namespace clns-N
+# Link the two private stubs statically into the Mesa DSOs instead (no
+# DT_NEEDED left). The public stubs (liblog/libnativewindow/libsync) stay
+# shared; the real system libraries satisfy those NEEDED entries because they
+# are listed in /system/etc/public.libraries.txt.
+#
+# The upstream hardware stub returns 0 without writing *module, which makes
+# u_gralloc's fallback dereference NULL. Return -1 so Mesa falls back cleanly
+# (RGB window buffers still work; only lock_ycbcr / YUV paths are lost).
+patch_mesa_android_stub() {
+  local src="$1"
+  python3 - "$src" <<'PY'
+import pathlib, sys
+
+src = pathlib.Path(sys.argv[1])
+meson = src / "src" / "android_stub" / "meson.build"
+hw = src / "src" / "android_stub" / "hardware_stub.cpp"
+
+text = meson.read_text(encoding="utf-8")
+marker = "# Private platform libs: link the stubs into the Mesa DSOs"
+old = """  stub_libs = []
+  lib_names = ['cutils', 'hardware', 'log', 'nativewindow', 'sync']
+
+  if with_libbacktrace
+    lib_names += ['backtrace']
+  endif
+
+  foreach lib : lib_names
+    stub_libs += shared_library(
+      lib,
+      files(lib + '_stub.cpp'),
+      include_directories : inc_include,
+      install : false,
+    )
+  endforeach"""
+new = """  stub_libs = []
+
+  # Private platform libs: link the stubs into the Mesa DSOs (no DT_NEEDED).
+  foreach lib : ['cutils', 'hardware']
+    stub_libs += static_library(
+      lib,
+      files(lib + '_stub.cpp'),
+      include_directories : inc_include,
+      install : false,
+    )
+  endforeach
+
+  # Public platform libs: keep shared stubs; at runtime the real system
+  # libraries (liblog/libnativewindow/libsync are in public.libraries.txt)
+  # satisfy the DT_NEEDED entries.
+  shared_lib_names = ['log', 'nativewindow', 'sync']
+
+  if with_libbacktrace
+    shared_lib_names += ['backtrace']
+  endif
+
+  foreach lib : shared_lib_names
+    stub_libs += shared_library(
+      lib,
+      files(lib + '_stub.cpp'),
+      include_directories : inc_include,
+      install : false,
+    )
+  endforeach"""
+
+if marker in text:
+    print("android_stub meson.build already patched", file=sys.stderr)
+elif old in text:
+    meson.write_text(text.replace(old, new, 1), encoding="utf-8")
+    print("patched src/android_stub/meson.build (static cutils/hardware)", file=sys.stderr)
+else:
+    sys.exit("error: cannot patch src/android_stub/meson.build: unexpected upstream layout")
+
+hw_text = hw.read_text(encoding="utf-8")
+if "*module = NULL" in hw_text:
+    print("hardware_stub.cpp already patched", file=sys.stderr)
+else:
+    old_hw = """int hw_get_module(const char *id, const struct hw_module_t **module)
+{
+   return 0;
+}"""
+    new_hw = """int hw_get_module(const char *id, const struct hw_module_t **module)
+{
+   if (module)
+      *module = NULL;
+   /* Report failure so u_gralloc falls back instead of dereferencing NULL. */
+   return -1;
+}"""
+    if old_hw not in hw_text:
+        sys.exit("error: cannot patch src/android_stub/hardware_stub.cpp: unexpected upstream layout")
+    hw.write_text(hw_text.replace(old_hw, new_hw, 1), encoding="utf-8")
+    print("patched src/android_stub/hardware_stub.cpp (hw_get_module returns -1)", file=sys.stderr)
+PY
+}
+
+# Fail the build if a packaged DSO still has DT_NEEDED on a private platform
+# library that Android app namespaces cannot resolve.
+verify_no_private_deps() {
+  local readelf_bin=""
+  if command -v llvm-readelf >/dev/null 2>&1; then
+    readelf_bin="$(command -v llvm-readelf)"
+  elif [[ -x "$(ndk_prebuilt)/bin/llvm-readelf" ]]; then
+    readelf_bin="$(ndk_prebuilt)/bin/llvm-readelf"
+  elif command -v readelf >/dev/null 2>&1; then
+    readelf_bin="$(command -v readelf)"
+  fi
+  if [[ -z "${readelf_bin}" ]]; then
+    log "WARN: no readelf found; skipping private-library dependency check"
+    return 0
+  fi
+  local bad=0 so dep
+  for so in "${OUT_JNI}"/*.so; do
+    [[ -f "${so}" ]] || continue
+    while IFS= read -r dep; do
+      [[ -n "${dep}" ]] || continue
+      case "${dep}" in
+        libcutils.so|libhardware.so|libutils.so|libbinder.so|libgui.so)
+          log "ERROR: $(basename "${so}") still has DT_NEEDED ${dep} (private platform lib; app namespace cannot load it)"
+          bad=1
+          ;;
+      esac
+    done < <("${readelf_bin}" -d "${so}" 2>/dev/null | sed -n 's/.*(NEEDED).*Shared library: \[\(.*\)\]/\1/p')
+  done
+  [[ "${bad}" -eq 0 ]] || die "private platform library dependencies remain; FCL's app namespace cannot dlopen these DSOs"
+  log "no private platform library dependencies in packaged DSOs"
+}
+
 build_mesa() {
   local src="${MESA_SRC:-$WORK/mesa}"
   if [[ ! -d "${src}/.git" ]]; then
     clone_if_needed "${src}" "${MESA_REPO}" "${MESA_REF}"
   fi
+  patch_mesa_android_stub "${src}"
   write_cross_file "${WORK}/android-mesa.ini" "${DRM_PREFIX}/lib/pkgconfig"
   export PKG_CONFIG_LIBDIR="${DRM_PREFIX}/lib/pkgconfig"
   export PKG_CONFIG_PATH="${DRM_PREFIX}/lib/pkgconfig"
@@ -446,6 +587,8 @@ package_libs() {
   elif [[ -x "$(ndk_prebuilt)/bin/llvm-strip" ]]; then
     "$(ndk_prebuilt)/bin/llvm-strip" -S "${OUT_JNI}"/*.so || true
   fi
+
+  verify_no_private_deps
 
   log "jniLibs payload:"
   ls -lh "${OUT_JNI}" >&2

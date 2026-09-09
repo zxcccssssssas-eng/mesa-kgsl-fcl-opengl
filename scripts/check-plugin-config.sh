@@ -53,6 +53,15 @@ check "NDK flexible page sizes enabled" grep -q 'ANDROID_SUPPORT_FLEXIBLE_PAGE_S
 check "Mesa linked with 16KB max-page-size" grep -q 'max-page-size=16384' "${ROOT}/scripts/build-mesa-android.sh"
 check "Mesa link uses \$ORIGIN rpath" grep -q 'rpath' "${ROOT}/scripts/build-mesa-android.sh"
 
+check "build script patches Mesa android_stub private libs" \
+  grep -q 'patch_mesa_android_stub' "${ROOT}/scripts/build-mesa-android.sh"
+check "build script links cutils/hardware stubs statically" \
+  grep -q "foreach lib : \['cutils', 'hardware'\]" "${ROOT}/scripts/build-mesa-android.sh"
+check "build script verifies no private platform deps" \
+  grep -q 'verify_no_private_deps' "${ROOT}/scripts/build-mesa-android.sh"
+check "hardware stub returns failure (no NULL deref in u_gralloc)" \
+  grep -q 'return -1;' "${ROOT}/scripts/build-mesa-android.sh"
+
 # Probe Mesa 26-style meson.options: osmesa must not be emitted.
 mesa_probe_dir="$(mktemp -d)"
 trap 'rm -rf "${mesa_probe_dir}"' EXIT

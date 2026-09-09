@@ -19,6 +19,11 @@ Secondary:
    - Use `FCL-FreedrenoKGSL-arm64.apk` (not `*-stub.apk`)
 2. Install the APK on the phone/tablet (sideload; allow unknown sources).
 3. **Force-stop / restart FoldCraftLauncher** so it rescans installed packages.
+   This is required after every plugin *update* too: FCL caches each plugin's
+   `nativeLibraryDir` + renderer string at process start, and Android gives the
+   APK a new `/data/app/~~.../lib/arm64` path on update. Updating the plugin
+   while FCL is running makes it dlopen the deleted old path
+   (`UnsatisfiedLinkError ... libGLESv2_mesa.so(error = null)`).
 4. Open FCL → version / renderer settings and select **Freedreno KGSL**.
 5. Launch the game.
 
@@ -60,6 +65,47 @@ If you still want an advertised version for a modpack, set FCL custom env yourse
 
 This plugin is **native Gallium Freedreno over KGSL**, not GL4ES / Holy-GL4ES / MobileGlues / LTW. Mesa 26 (lfdevs `adreno-main`) **removed OSMesa**, so the plugin talks to FCL the same way FCL's Mesa EGL path does: `libEGL_mesa.so` + `POJAV_RENDERER=opengles3_desktopgl` (desktop OpenGL via `EGL_OPENGL_API`).
 
+
+### `libcutils.so` / `libhardware.so` not found (fixed in 1.2.3)
+
+Symptom (FCL log + `logcat -s FCL`):
+
+```text
+GLFW: Failed to create window context!
+java.lang.UnsatisfiedLinkError: Failed to dynamically load library:
+  /data/app/~~.../com.mio.plugin.renderer.freedreno.kgsl-.../lib/arm64/libGLESv2_mesa.so(error = null)
+E/FCL: DLOPEN: loading .../libgallium_dri.so
+  (error = dlopen failed: library "libcutils.so" not found: needed by .../libgallium_dri.so in namespace clns-9)
+```
+
+Root cause: Mesa built with `-Dandroid-stub=true` links its stub DSOs as
+`DT_NEEDED`. `libcutils.so` and `libhardware.so` are **private platform
+libraries**, and Android app processes (the JVM classloader namespace `clns-N`
+LWJGL dlopens the renderer from) can only resolve libraries listed in
+`/system/etc/public.libraries.txt`. `liblog`/`libnativewindow`/`libsync` are
+public, so they were fine; `libcutils`/`libhardware` are not, so the whole
+dlopen chain failed before Mesa could even initialize.
+
+Fix: `scripts/build-mesa-android.sh` now patches Mesa's
+`src/android_stub/meson.build` so the `cutils` and `hardware` stubs are linked
+**statically into** `libgallium_dri.so` / `libEGL_mesa.so` / `libvulkan_freedreno.so`
+(no `DT_NEEDED` left). The public stubs stay shared and resolve to the real
+system libraries. Mesa's `hw_get_module` stub now returns failure instead of
+`0` with an unset `*module`, so `u_gralloc` cleanly falls back to its generic
+gralloc implementation (RGB window buffers keep working; `lock_ycbcr`/YUV video
+paths are unavailable in the fallback).
+
+The build also hard-fails if any packaged DSO still has a `DT_NEEDED` on
+`libcutils`/`libhardware`/`libutils`/`libbinder`/`libgui`, so this regression
+cannot ship again silently.
+
+### Renderer does not appear / old renderer after updating the plugin
+
+FCL scans plugin packages once per process. After installing or updating this
+APK, force-stop FCL (`am force-stop com.tungsten.fcl`) before launching a game.
+Otherwise FCL keeps the previous plugin's `nativeLibraryDir` in memory and
+dlopens a directory Android already deleted.
+
 ### NeoForge: "Failed to find a valid GLFW profile"
 
 1. Install plugin **1.1.0+** (pojavEnv now DLOPENs `libEGL_mesa.so`; no forced GL 4.6).
@@ -82,6 +128,11 @@ POJAV_RENDERER=opengles3_desktopgl   # pojav; FCL binds EGL_OPENGL_API
 ```
 
 Default path is **pure Gallium Freedreno over KGSL** (not Zink). `libfreedreno_kgsl_init.so` pins KGSL before Mesa creates a device. The renderer string is `FreedrenoKGSL:libGLESv2_mesa.so:libEGL_mesa.so`. FCL sets `POJAVEXEC_EGL` from the EGL library name.
+
+The packaged DSOs only depend on public Android libraries
+(`liblog`, `libnativewindow`, `libsync`, `libz`, `libm`, `libdl`, `libc`) plus
+each other via `DT_RUNPATH=$ORIGIN`; the private `libcutils`/`libhardware`
+stubs are linked in statically (see the troubleshooting section above).
 
 The Turnip AdrenoTools zip is an optional separate artifact for people who want Vulkan/Zink later; this plugin itself does not switch you to Zink.
 
