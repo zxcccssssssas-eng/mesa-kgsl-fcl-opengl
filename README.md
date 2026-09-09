@@ -50,7 +50,7 @@ If the workflow produced `turnip-freedreno-kgsl-adrenotools.zip`:
 | Qualcomm **Adreno 6xx / 7xx / 8xx** (including A840-class chips that lfdevs Mesa supports) | Mali, PowerVR, Xclipse, desktop GPUs |
 | Android devices that expose **KGSL** (`/dev/kgsl-3d0`) | Non-Android Linux containers (use [lfdevs/mesa-for-android-container](https://github.com/lfdevs/mesa-for-android-container) for those) |
 
-Architecture: **arm64-v8a only**.
+Architecture: **arm64-v8a only**. Mesa 26 Turnip needs Android API **29+** (the NDK compile uses `aarch64-linux-android29-clang`, matching Vera-Firefly). The plugin `minSdk` is 29.
 
 ## OpenGL version (honest)
 
@@ -109,6 +109,7 @@ Dispatch inputs:
 ### Local
 
 Need: Android SDK, NDK r27+, meson, ninja, pkg-config, python3-mako, git, zip.
+The Mesa NDK clang target is API **29** (`SDK_VER=29`).
 
 ```bash
 export NDK=/path/to/android-ndk-r27c

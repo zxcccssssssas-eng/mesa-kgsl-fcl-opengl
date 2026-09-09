@@ -10,7 +10,7 @@ android {
 
     defaultConfig {
         applicationId = "com.mio.plugin.renderer"
-        minSdk = 26
+        minSdk = 29
         targetSdk = 34
         versionCode = 1
         versionName = "1.0.0"
@@ -23,7 +23,7 @@ android {
                 val realEgl = file("src/main/jniLibs/arm64-v8a/libEGL_mesa.so")
                 arguments += listOf(
                     "-DANDROID_STL=none",
-                    "-DANDROID_PLATFORM=android-26",
+                    "-DANDROID_PLATFORM=android-29",
                     "-DFCL_STUB_MESA_EGL=${if (realEgl.exists()) "OFF" else "ON"}",
                 )
             }
