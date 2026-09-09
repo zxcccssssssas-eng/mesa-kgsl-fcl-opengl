@@ -115,8 +115,8 @@ pkgconfig = ['env', 'PKG_CONFIG_LIBDIR=${pkgconfig_libdir}', '/usr/bin/pkg-confi
 [built-in options]
 c_args = ['-O3', '-fPIC', '-DVK_USE_PLATFORM_ANDROID_KHR', '-fno-strict-aliasing']
 cpp_args = ['-O3', '-fPIC', '-DVK_USE_PLATFORM_ANDROID_KHR', '-fno-exceptions', '-fno-unwind-tables', '-Wno-c++11-narrowing']
-c_link_args = ['-fuse-ld=lld']
-cpp_link_args = ['-fuse-ld=lld', '-static-libstdc++']
+c_link_args = ['-fuse-ld=lld', '-Wl,-z,max-page-size=16384']
+cpp_link_args = ['-fuse-ld=lld', '-static-libstdc++', '-Wl,-z,max-page-size=16384']
 
 [host_machine]
 system = 'android'
