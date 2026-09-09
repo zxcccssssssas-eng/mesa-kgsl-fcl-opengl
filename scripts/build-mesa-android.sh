@@ -27,7 +27,7 @@ OUT_DIST="${OUT_DIST:-$ROOT/dist}"
 BUILD_VULKAN="${BUILD_VULKAN:-1}"
 JOBS="${JOBS:-$(nproc)}"
 
-log() { printf '==> %s\n' "$*"; }
+log() { printf '==> %s\n' "$*" >&2; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
 need_cmd() {
@@ -126,6 +126,55 @@ clone_if_needed() {
     || git clone --depth 1 "${url}" "${dest}"
 }
 
+# True if meson_options.txt / meson.options declares option('name').
+drm_has_option() {
+  local src="$1" name="$2"
+  python3 - "$src" "$name" <<'PY'
+import pathlib, re, sys
+src, name = pathlib.Path(sys.argv[1]), sys.argv[2]
+text = ""
+for n in ("meson_options.txt", "meson.options"):
+    p = src / n
+    if p.is_file():
+        text += p.read_text(encoding="utf-8", errors="replace")
+sys.exit(0 if re.search(r"option\(\s*['\"]" + re.escape(name) + r"['\"]", text) else 1)
+PY
+}
+
+# Current libdrm (2.4.134+) dropped the 'freedreno' / 'freedreno-kgsl' meson
+# options and the libdrm_freedreno backend. KGSL lives in Mesa
+# (-Dfreedreno-kmds=kgsl). Older libdrm still has those options; probe so
+# both trees configure.
+libdrm_meson_flags() {
+  local src="$1"
+  local -a flags=(-Ddefault_library=static)
+  local name
+  # Disable unused KMS backends. Feature options take enabled/disabled/auto.
+  for name in intel radeon amdgpu nouveau vmwgfx omap exynos tegra vc4 etnaviv \
+              cairo-tests man-pages valgrind; do
+    if drm_has_option "${src}" "${name}"; then
+      flags+=("-D${name}=disabled")
+    fi
+  done
+  for name in tests install-test-programs udev; do
+    if drm_has_option "${src}" "${name}"; then
+      flags+=("-D${name}=false")
+    fi
+  done
+  # Only pass these if this libdrm still ships them.
+  if drm_has_option "${src}" "freedreno"; then
+    flags+=("-Dfreedreno=enabled")
+  else
+    log "libdrm has no 'freedreno' option (current upstream); KGSL is Mesa-side"
+  fi
+  if drm_has_option "${src}" "freedreno-kgsl"; then
+    flags+=("-Dfreedreno-kgsl=true")
+  else
+    log "libdrm has no 'freedreno-kgsl' option; skipping"
+  fi
+  printf '%s\n' "${flags[@]}"
+}
+
 build_libdrm() {
   local src="${DRM_SRC:-$WORK/drm}"
   clone_if_needed "${src}" "${DRM_REPO}" "${DRM_REF:-main}"
@@ -135,19 +184,13 @@ build_libdrm() {
   if [[ -d "${src}/build-android" ]]; then
     drm_reconf=(--reconfigure)
   fi
+  local -a drm_flags=()
+  mapfile -t drm_flags < <(libdrm_meson_flags "${src}")
+  log "libdrm meson flags: ${drm_flags[*]}"
   meson setup "${src}/build-android" "${src}" \
     --prefix="${DRM_PREFIX}" \
     --cross-file "${WORK}/android-drm.ini" \
-    -Ddefault_library=static \
-    -Dintel=disabled \
-    -Dradeon=disabled \
-    -Damdgpu=disabled \
-    -Dnouveau=disabled \
-    -Dvmwgfx=disabled \
-    -Dfreedreno=enabled \
-    -Dvc4=disabled \
-    -Detnaviv=disabled \
-    -Dfreedreno-kgsl=true \
+    "${drm_flags[@]}" \
     "${drm_reconf[@]}"
   meson compile -C "${src}/build-android" -j "${JOBS}"
   meson install -C "${src}/build-android"
@@ -290,4 +333,6 @@ main() {
   log "Mesa Android NDK build complete"
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
