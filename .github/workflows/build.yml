@@ -1,0 +1,183 @@
+name: Build FCL Freedreno KGSL plugin
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      mesa_ref:
+        description: "lfdevs/mesa-for-android-container branch or tag"
+        required: false
+        default: "adreno-main"
+      build_mesa:
+        description: "Build Mesa with the Android NDK (slow; required for a working renderer)"
+        required: false
+        type: boolean
+        default: true
+      build_vulkan:
+        description: "Also build Turnip (libvulkan_freedreno.so) for the AdrenoTools zip"
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  MESA_REF: ${{ github.event.inputs.mesa_ref || 'adreno-main' }}
+  NDK_VERSION: "27.2.12479018"
+
+jobs:
+  mesa-ndk:
+    name: Mesa NDK (arm64 Freedreno KGSL)
+    if: >
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.build_mesa != 'false')
+      || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install host tools
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            git python3 python3-pip python3-setuptools python3-wheel \
+            python3-mako python3-yaml bison flex pkg-config cmake ninja-build \
+            unzip zip curl ccache glslang-tools glslang-dev \
+            libxml2-dev llvm-dev
+          pip3 install --user meson packaging mako pyyaml \
+            || pip3 install --user --break-system-packages meson packaging mako pyyaml
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Cache ccache + Mesa sources
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.ccache
+            .native-build
+          key: mesa-ndk-${{ env.MESA_REF }}-${{ runner.os }}-${{ hashFiles('scripts/build-mesa-android.sh') }}
+          restore-keys: |
+            mesa-ndk-${{ env.MESA_REF }}-${{ runner.os }}-
+            mesa-ndk-
+
+      - name: Download Android NDK
+        run: |
+          NDK_ZIP="android-ndk-r27c-linux.zip"
+          curl -L --retry 5 -o "/tmp/${NDK_ZIP}" \
+            "https://dl.google.com/android/repository/${NDK_ZIP}"
+          unzip -q "/tmp/${NDK_ZIP}" -d "${HOME}"
+          echo "NDK=${HOME}/android-ndk-r27c" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=${HOME}/android-ndk-r27c" >> "$GITHUB_ENV"
+
+      - name: Configure ccache
+        run: |
+          export CCACHE_DIR="${HOME}/.ccache"
+          ccache --max-size=3G
+          ccache --zero-stats || true
+
+      - name: Build Mesa (OSMesa + Freedreno KGSL)
+        env:
+          BUILD_VULKAN: ${{ github.event.inputs.build_vulkan == 'false' && '0' || '1' }}
+        run: |
+          chmod +x scripts/*.sh
+          ./scripts/build-mesa-android.sh
+
+      - name: Upload native libraries
+        uses: actions/upload-artifact@v4
+        with:
+          name: mesa-jniLibs-arm64-v8a
+          path: app/src/main/jniLibs/arm64-v8a/*.so
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload AdrenoTools zip (if Turnip was produced)
+        uses: actions/upload-artifact@v4
+        with:
+          name: turnip-adrenotools-zip
+          path: dist/*.zip
+          if-no-files-found: ignore
+          retention-days: 14
+
+  apk:
+    name: FCL Renderer Plugin APK
+    runs-on: ubuntu-latest
+    needs: [mesa-ndk]
+    if: always() && (needs.mesa-ndk.result == 'success' || needs.mesa-ndk.result == 'skipped')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install platform + NDK + CMake
+        run: |
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-34" \
+            "build-tools;34.0.0" \
+            "ndk;${NDK_VERSION}" \
+            "cmake;3.22.1"
+
+      - name: Download Mesa native libs
+        if: needs.mesa-ndk.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: mesa-jniLibs-arm64-v8a
+          path: app/src/main/jniLibs/arm64-v8a
+
+      - name: Check plugin config
+        run: |
+          chmod +x scripts/*.sh
+          ./scripts/check-plugin-config.sh
+
+      - name: Assemble release APK
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:assembleRelease --stacktrace --no-daemon
+
+      - name: Verify APK
+        run: |
+          APK=$(find app/build/outputs/apk -name '*.apk' | head -n1)
+          test -n "${APK}"
+          mkdir -p dist
+          if [[ "${{ needs.mesa-ndk.result }}" == "success" ]]; then
+            NAME="FCL-FreedrenoKGSL-arm64.apk"
+          else
+            NAME="FCL-FreedrenoKGSL-stub.apk"
+          fi
+          cp "${APK}" "dist/${NAME}"
+          echo "APK=${PWD}/dist/${NAME}" >> "$GITHUB_ENV"
+          unzip -l "dist/${NAME}" | grep -E 'lib/arm64-v8a/libOSM(Bridge|esa)\.so'
+          ./scripts/check-plugin-config.sh "dist/${NAME}"
+          ls -lh dist/
+
+      - name: Download AdrenoTools zip
+        if: needs.mesa-ndk.result == 'success'
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: turnip-adrenotools-zip
+          path: dist
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fcl-freedreno-kgsl-apk
+          path: |
+            dist/*.apk
+            dist/*.zip
+          if-no-files-found: error
+          retention-days: 30
