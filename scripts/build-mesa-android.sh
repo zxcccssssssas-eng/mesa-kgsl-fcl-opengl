@@ -1,10 +1,23 @@
 #!/usr/bin/env bash
-# Cross-compile Mesa Gallium Freedreno (KGSL) + OSMesa + Turnip for Android arm64.
+# Cross-compile Mesa Gallium Freedreno (KGSL) + Android EGL/GLES for FCL.
 #
-# Proven flags come from:
-#   - Vera-Firefly/android-mesa-build  (OSMesa + gallium freedreno/zink, Android NDK)
-#   - lfdevs/mesa-for-android-container  (-Dfreedreno-kmds=kgsl)
-#   - whitebelyash turnip_builder.sh     (Vulkan Turnip AdrenoTools zip)
+# Mesa 25.x (Vera-Firefly/android-mesa-build, mesa-25.1.4) still has
+# -Dosmesa=true. lfdevs/mesa-for-android-container adreno-main is Mesa 26
+# and dropped the OSMesa frontend entirely (no osmesa / gallium-osmesa
+# meson option, no src/gallium/targets/osmesa). FCL's custom_gallium path
+# needed libOSMesa.so; this script therefore:
+#   - probes meson.options like libdrm
+#   - never passes unknown options (including -Dosmesa=true)
+#   - builds Android EGL + GLES2 + desktop OpenGL + Freedreno KGSL
+#   - packages libEGL_mesa.so / libGLESv2_mesa.so / libgallium_dri.so
+#
+# Proven flag sources for this Mesa generation:
+#   - Mesa docs/android.rst (NDK: -Dplatforms=android -Dandroid-stub=true
+#     -Dandroid-libbacktrace=disabled -Dfreedreno-kmds=kgsl)
+#   - Vera-Firefly/android-mesa-build (NDK android-stub, platform-sdk 33,
+#     gallium zink,freedreno, -Dfreedreno-kmds=kgsl,msm) minus -Dosmesa=true
+#   - lfdevs adreno-main meson.options (egl/gles2 are feature options)
+#   - FCL built-in Zink: libEGL_mesa.so + POJAV_RENDERER=opengles3_desktopgl*
 #
 # Usage:
 #   ./scripts/build-mesa-android.sh
@@ -127,7 +140,7 @@ clone_if_needed() {
 }
 
 # True if meson_options.txt / meson.options declares option('name').
-drm_has_option() {
+meson_has_option() {
   local src="$1" name="$2"
   python3 - "$src" "$name" <<'PY'
 import pathlib, re, sys
@@ -140,6 +153,8 @@ for n in ("meson_options.txt", "meson.options"):
 sys.exit(0 if re.search(r"option\(\s*['\"]" + re.escape(name) + r"['\"]", text) else 1)
 PY
 }
+
+drm_has_option() { meson_has_option "$@"; }
 
 # Current libdrm (2.4.134+) dropped the 'freedreno' / 'freedreno-kgsl' meson
 # options and the libdrm_freedreno backend. KGSL lives in Mesa
@@ -161,7 +176,6 @@ libdrm_meson_flags() {
       flags+=("-D${name}=false")
     fi
   done
-  # Only pass these if this libdrm still ships them.
   if drm_has_option "${src}" "freedreno"; then
     flags+=("-Dfreedreno=enabled")
   else
@@ -196,38 +210,109 @@ build_libdrm() {
   meson install -C "${src}/build-android"
 }
 
+# Emit -D flags that exist in this Mesa tree. Never emits -Dosmesa=* unless
+# that option is still declared (Mesa 25). lfdevs adreno-main (26) does not.
 mesa_flags() {
-  local vulkan_drivers=""
-  if [[ "${BUILD_VULKAN}" == "1" ]]; then
-    vulkan_drivers="freedreno"
-  fi
-  cat <<EOF
---prefix=${MESA_PREFIX}
---cross-file=${WORK}/android-mesa.ini
--Dbuildtype=release
--Dplatforms=android
--Dplatform-sdk-version=33
--Dandroid-stub=true
--Dandroid-libbacktrace=disabled
--Dandroid-strict=false
--Dxlib-lease=disabled
--Degl=disabled
--Dgbm=disabled
--Dglx=disabled
--Dllvm=disabled
--Dopengl=true
--Dosmesa=true
--Dgles1=disabled
--Dglvnd=disabled
--Dlibunwind=disabled
--Dmicrosoft-clc=disabled
--Dvalgrind=disabled
--Dintel-rt=disabled
--Dgallium-drivers=zink,freedreno
--Dfreedreno-kmds=kgsl
--Dvulkan-drivers=${vulkan_drivers}
--Dtools=
-EOF
+  local src="$1"
+  python3 - "$src" "${BUILD_VULKAN}" <<'PY'
+import pathlib, re, sys
+
+src = pathlib.Path(sys.argv[1])
+want_vulkan = sys.argv[2] == "1"
+text = ""
+for n in ("meson.options", "meson_options.txt"):
+    p = src / n
+    if p.is_file():
+        text += p.read_text(encoding="utf-8", errors="replace")
+opts = set(re.findall(r"option\(\s*['\"]([^'\"]+)['\"]", text))
+
+def emit(name, value):
+    if name in opts:
+        print(f"-D{name}={value}")
+    else:
+        print(f"skip unknown meson option {name}", file=sys.stderr)
+
+# Android NDK + Freedreno KGSL. Values match Vera-Firefly/android-mesa-build
+# and Mesa docs/android.rst, except OSMesa (removed in Mesa 26) and EGL
+# which must be enabled for FCL (egl + gles2 are feature options).
+emit("platforms", "android")
+emit("platform-sdk-version", "33")
+emit("android-stub", "true")
+emit("android-strict", "false")
+emit("android-libbacktrace", "disabled")
+emit("android-libperfetto", "disabled")
+emit("xlib-lease", "disabled")
+emit("egl", "enabled")
+emit("egl-native-platform", "android")
+emit("gles2", "enabled")
+emit("gles1", "disabled")
+emit("opengl", "true")
+emit("gbm", "disabled")
+emit("glx", "disabled")
+emit("llvm", "disabled")
+emit("glvnd", "disabled")
+emit("libunwind", "disabled")
+emit("microsoft-clc", "disabled")
+emit("valgrind", "disabled")
+emit("intel-rt", "disabled")
+emit("lmsensors", "disabled")
+emit("display-info", "disabled")
+emit("gallium-va", "disabled")
+emit("xmlconfig", "disabled")
+emit("expat", "disabled")
+emit("gallium-drivers", "zink,freedreno")
+emit("freedreno-kmds", "kgsl")
+emit("vulkan-drivers", "freedreno" if want_vulkan else "")
+emit("tools", "")
+# Avoid clashing with Android system libEGL.so / libGLESv2.so (FCL Zink
+# already loads libEGL_mesa.so). Android also unversions libgallium_dri.
+emit("egl-lib-suffix", "_mesa")
+emit("gles-lib-suffix", "_mesa")
+emit("unversion-libgallium", "true")
+emit("allow-fallback-for", "libdrm")
+emit("build-tests", "false")
+emit("gallium-rusticl", "false")
+
+# Mesa 25 still has these; Mesa 26 does not. Only pass if declared.
+if "osmesa" in opts:
+    print("Mesa still declares osmesa; enabling alongside EGL", file=sys.stderr)
+    emit("osmesa", "true")
+else:
+    print("Mesa has no 'osmesa' option (26+); using Android EGL/GLES", file=sys.stderr)
+if "gallium-osmesa" in opts:
+    emit("gallium-osmesa", "true")
+PY
+}
+
+meson_setup_mesa() {
+  local src="$1"
+  shift
+  local -a args=("$@")
+  local logf="${WORK}/meson-setup-mesa.log"
+  local attempt unknown a
+  for attempt in 1 2 3 4 5; do
+    log "meson setup Mesa (attempt ${attempt}): ${args[*]}"
+    if meson setup "${src}/build-android" "${src}" "${args[@]}" >"${logf}" 2>&1; then
+      cat "${logf}" >&2
+      return 0
+    fi
+    cat "${logf}" >&2
+    unknown="$(grep -oE 'Unknown option: "[^"]+"' "${logf}" | head -n1 | sed -E 's/Unknown option: "([^"]+)"/\1/' || true)"
+    if [[ -z "${unknown}" ]]; then
+      return 1
+    fi
+    log "dropping unknown meson option '${unknown}' and retrying"
+    local -a next=()
+    for a in "${args[@]}"; do
+      if [[ "${a}" == "-D${unknown}="* ]]; then
+        continue
+      fi
+      next+=("${a}")
+    done
+    args=("${next[@]}")
+    rm -rf "${src}/build-android"
+  done
+  return 1
 }
 
 build_mesa() {
@@ -239,21 +324,33 @@ build_mesa() {
   export PKG_CONFIG_LIBDIR="${DRM_PREFIX}/lib/pkgconfig"
   export PKG_CONFIG_PATH="${DRM_PREFIX}/lib/pkgconfig"
 
-  local args=()
-  mapfile -t args < <(mesa_flags)
-  log "meson setup Mesa with Freedreno KGSL + OSMesa"
-  local reconf=()
-  if [[ -d "${src}/build-android" ]]; then
-    reconf=(--reconfigure)
-  fi
-  if ! meson setup "${src}/build-android" "${src}" "${args[@]}" "${reconf[@]}"; then
+  local -a dflags=()
+  mapfile -t dflags < <(mesa_flags "${src}")
+  log "Mesa -D flags: ${dflags[*]}"
+
+  # Drop stale meson build dirs (CI cache may still have -Dosmesa=true).
+  rm -rf "${src}/build-android"
+
+  local -a args=(
+    --prefix="${MESA_PREFIX}"
+    --cross-file="${WORK}/android-mesa.ini"
+    -Dbuildtype=release
+    "${dflags[@]}"
+  )
+  if ! meson_setup_mesa "${src}" "${args[@]}"; then
     if [[ "${BUILD_VULKAN}" == "1" ]]; then
       log "meson setup with vulkan failed; retrying gallium-only"
       BUILD_VULKAN=0
       rm -rf "${src}/build-android"
-      args=()
-      mapfile -t args < <(mesa_flags)
-      meson setup "${src}/build-android" "${src}" "${args[@]}"
+      dflags=()
+      mapfile -t dflags < <(mesa_flags "${src}")
+      args=(
+        --prefix="${MESA_PREFIX}"
+        --cross-file="${WORK}/android-mesa.ini"
+        -Dbuildtype=release
+        "${dflags[@]}"
+      )
+      meson_setup_mesa "${src}" "${args[@]}" || die "meson setup failed"
     else
       die "meson setup failed"
     fi
@@ -262,45 +359,62 @@ build_mesa() {
   meson install -C "${src}/build-android"
 }
 
+# libEGL_mesa.so.1.0.0 → libEGL_mesa.so
+unversioned_so_name() {
+  local base
+  base="$(basename "$1")"
+  printf '%s' "${base%%.so*}.so"
+}
+
+copy_so() {
+  local src="$1"
+  local dest="${OUT_JNI}/$(unversioned_so_name "${src}")"
+  cp -L "${src}" "${dest}"
+  log "packaged $(basename "${dest}")"
+}
+
 package_libs() {
   mkdir -p "${OUT_JNI}" "${OUT_DIST}"
-  local libdir="${MESA_PREFIX}/lib"
-  [[ -d "${libdir}" ]] || libdir="${MESA_PREFIX}/lib64"
-  [[ -d "${libdir}" ]] || die "Mesa libdir missing under ${MESA_PREFIX}"
-
   log "Mesa installed libraries:"
-  find "${MESA_PREFIX}" -name '*.so*' | sort
+  find "${MESA_PREFIX}" \( -name '*.so' -o -name '*.so.*' \) | sort >&2
 
-  local osmesa=""
-  for cand in "${libdir}/libOSMesa.so" "${libdir}/libOSMesa.so.8"; do
-    if [[ -f "${cand}" ]]; then
-      osmesa="${cand}"
-      break
+  local so
+  while IFS= read -r so; do
+    local base
+    base="$(basename "${so}")"
+    case "${base}" in
+      libEGL*.so|libEGL*.so.*) copy_so "${so}" ;;
+      libGLESv2*.so|libGLESv2*.so.*) copy_so "${so}" ;;
+      libgallium*.so|libgallium*.so.*) copy_so "${so}" ;;
+      libglapi*.so|libglapi*.so.*) copy_so "${so}" ;;
+      libvulkan_freedreno.so|libvulkan_freedreno.so.*) copy_so "${so}" ;;
+      *_dri.so|*_dri.so.*) copy_so "${so}" ;;
+    esac
+  done < <(find "${MESA_PREFIX}" \( -name '*.so' -o -name '*.so.*' \) | sort)
+
+  local egl="" gles="" gallium="" osmesa=""
+  egl="$(ls "${OUT_JNI}"/libEGL*.so 2>/dev/null | head -n1 || true)"
+  gles="$(ls "${OUT_JNI}"/libGLESv2*.so 2>/dev/null | head -n1 || true)"
+  gallium="$(ls "${OUT_JNI}"/libgallium*.so 2>/dev/null | head -n1 || true)"
+  osmesa="$(ls "${OUT_JNI}"/libOSMesa*.so 2>/dev/null | head -n1 || true)"
+
+  if [[ -z "${egl}" || -z "${gles}" ]]; then
+    if [[ -n "${osmesa}" ]]; then
+      log "EGL/GLES not built; OSMesa is present (Mesa 25 tree)"
+    else
+      die "Mesa did not install libEGL*.so + libGLESv2*.so (or libOSMesa.so)"
     fi
-  done
-  [[ -n "${osmesa}" ]] || die "libOSMesa.so not produced (OSMesa build failed)"
-  cp -L "${osmesa}" "${OUT_JNI}/libOSMesa.so"
-
-  if [[ -f "${libdir}/libglapi.so" ]]; then
-    cp -L "${libdir}/libglapi.so" "${OUT_JNI}/libglapi.so"
+  fi
+  if [[ -z "${gallium}" ]]; then
+    log "warning: libgallium*.so not found; EGL may fail to load the dri driver"
   fi
 
   local turnip=""
-  for cand in \
-      "${libdir}/libvulkan_freedreno.so" \
-      "${MESA_PREFIX}/lib/libvulkan_freedreno.so" \
-      "${MESA_PREFIX}/share/vulkan/icd.d/"*; do
-    if [[ -f "${cand}" && "${cand}" == *.so ]]; then
-      turnip="${cand}"
-      break
-    fi
-  done
-  # ICD json often points at libvulkan_freedreno.so next to it or in lib/
-  if [[ -z "${turnip}" ]]; then
-    turnip="$(find "${MESA_PREFIX}" -name 'libvulkan_freedreno.so' | head -n1 || true)"
-  fi
+  turnip="$(find "${OUT_JNI}" "${MESA_PREFIX}" -name 'libvulkan_freedreno.so' 2>/dev/null | head -n1 || true)"
   if [[ -n "${turnip}" && -f "${turnip}" ]]; then
-    cp -L "${turnip}" "${OUT_JNI}/libvulkan_freedreno.so"
+    if [[ "${turnip}" != "${OUT_JNI}/libvulkan_freedreno.so" ]]; then
+      cp -L "${turnip}" "${OUT_JNI}/libvulkan_freedreno.so"
+    fi
     "${ROOT}/scripts/package-adrenotools-zip.sh" \
       "${OUT_JNI}/libvulkan_freedreno.so" \
       "${OUT_DIST}/turnip-freedreno-kgsl-adrenotools.zip"
@@ -315,7 +429,7 @@ package_libs() {
   fi
 
   log "jniLibs payload:"
-  ls -lh "${OUT_JNI}"
+  ls -lh "${OUT_JNI}" >&2
 }
 
 main() {

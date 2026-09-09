@@ -27,9 +27,9 @@ FCL finds plugins by scanning installed apps for:
 | meta-data | this plugin |
 |---|---|
 | `fclPlugin` | `true` |
-| `renderer` | `FreedrenoKGSL:libOSMBridge.so:libEGL.so` |
+| `renderer` | `FreedrenoKGSL:libGLESv2_mesa.so:libEGL_mesa.so` |
 | `des` | `Freedreno KGSL (Mesa Gallium, Adreno)` |
-| `boatEnv` / `pojavEnv` | KGSL + OSMesa env (see below) |
+| `boatEnv` / `pojavEnv` | KGSL + Mesa EGL env (see below) |
 
 Package id: `com.mio.plugin.renderer.freedreno.kgsl`
 
@@ -67,26 +67,25 @@ That is the **advertised** desktop GL version Mesa is configured to report. It i
 - Some 4.x features are missing, lowered, or buggy. Shader packs and Sodium/Iris can expose that.
 - If a version is too new for the GPU, unset the override in FCL custom env, or try `4.5` / `4.4`.
 
-This plugin is **native Gallium Freedreno over KGSL**, not GL4ES, Holy-GL4ES, MobileGlues, or LTW. On paper that is the path that can actually implement desktop GL on Adreno instead of translating GLES.
+This plugin is **native Gallium Freedreno over KGSL**, not GL4ES, Holy-GL4ES, MobileGlues, or LTW. Mesa 26 (lfdevs `adreno-main`) **removed OSMesa**, so the plugin talks to FCL the same way FCL's built-in Zink renderer does: Mesa EGL (`libEGL_mesa.so`) with `POJAV_RENDERER=opengles3_desktopgl` so FCL binds `EGL_OPENGL_API` (desktop OpenGL), not the old `custom_gallium` + `libOSMesa.so` path.
 
 ## Environment injected into FCL
 
-Boat (`boatEnv`) and Pojav (`pojavEnv`) both pin KGSL Freedreno and the proven FCL Mesa ABI (`custom_gallium` + OSMesa):
+Boat (`boatEnv`) and Pojav (`pojavEnv`) both pin KGSL Freedreno and Mesa 26's Android EGL/GLES libraries:
 
 ```text
 GALLIUM_DRIVER=freedreno
 MESA_LOADER_DRIVER_OVERRIDE=kgsl
 FD_FORCE_KGSL=1
-MESA_LIBRARY=libOSMesa.so
+LIBGL_ES=3
 MESA_GL_VERSION_OVERRIDE=4.6
 MESA_GLSL_VERSION_OVERRIDE=460
 mesa_glthread=true
-DLOPEN=libOSMBridge.so,libOSMesa.so   # boat
-POJAV_RENDERER=custom_gallium         # pojav
-LIB_MESA_NAME=libOSMBridge.so         # pojav
+DLOPEN=libfreedreno_kgsl_init.so,libgallium_dri.so,libEGL_mesa.so,libGLESv2_mesa.so
+POJAV_RENDERER=opengles3_desktopgl   # pojav; FCL binds EGL_OPENGL_API
 ```
 
-`libOSMBridge.so` is a small trampoline: it `dlopen`s `libOSMesa.so` and forwards OSMesa symbols, matching [Vera-Firefly/FCL-Mesa-Plugin](https://github.com/Vera-Firefly/FCL-Mesa-Plugin) / [ShirosakiMio/FCLRendererPlugin](https://github.com/ShirosakiMio/FCLRendererPlugin).
+`libfreedreno_kgsl_init.so` only pins those env vars before Mesa creates a device. The renderer string is `FreedrenoKGSL:libGLESv2_mesa.so:libEGL_mesa.so`. FCL sets `POJAVEXEC_EGL` from the EGL library name (same pattern as built-in Zink's `libEGL_mesa.so`).
 
 To try **Zink** (OpenGL on Vulkan) instead of native Freedreno, add FCL custom env `GALLIUM_DRIVER=zink` and import a Turnip driver (the AdrenoTools zip from this build, or any FCL driver plugin).
 
@@ -97,14 +96,14 @@ To try **Zink** (OpenGL on Vulkan) instead of native Freedreno, add FCL custom e
 Actions workflow `.github/workflows/build.yml`:
 
 - `workflow_dispatch` is enabled. **Run workflow** with `build_mesa=true` (default) to compile Mesa with the NDK and produce a usable APK.
-- Pull requests assemble a **stub** APK (plugin metadata + `libOSMBridge.so` + no-op `libOSMesa.so`) so Gradle stays green without a 1 hour Mesa compile. The stub is **not** a working renderer.
+- Pull requests assemble a **stub** APK (plugin metadata + placeholder `libEGL_mesa.so` / `libGLESv2_mesa.so` / `libgallium_dri.so`) so Gradle stays green without a 1 hour Mesa compile. The stub is **not** a working renderer.
 
 Dispatch inputs:
 
 | input | default | meaning |
 |---|---|---|
 | `mesa_ref` | `adreno-main` | [lfdevs/mesa-for-android-container](https://github.com/lfdevs/mesa-for-android-container) branch |
-| `build_mesa` | `true` | NDK Mesa + real `libOSMesa.so` |
+| `build_mesa` | `true` | NDK Mesa + real `libEGL_mesa.so` |
 | `build_vulkan` | `true` | Turnip ICD + AdrenoTools zip |
 
 ### Local
@@ -114,7 +113,7 @@ Need: Android SDK, NDK r27+, meson, ninja, pkg-config, python3-mako, git, zip.
 ```bash
 export NDK=/path/to/android-ndk-r27c
 export MESA_REF=adreno-main
-./scripts/build-mesa-android.sh          # writes app/src/main/jniLibs/arm64-v8a/libOSMesa.so
+./scripts/build-mesa-android.sh          # writes app/src/main/jniLibs/arm64-v8a/libEGL_mesa.so …
 ./gradlew :app:assembleRelease           # APK under app/build/outputs/apk/release/
 ./scripts/check-plugin-config.sh app/build/outputs/apk/release/*.apk
 ```
@@ -134,23 +133,70 @@ passes those if present. On libdrm 2.4.134 that is:
 
 KGSL is enabled in **Mesa**, not libdrm.
 
-Mesa meson flags (NDK, not the Linux container flags):
+Mesa meson flags for **lfdevs `adreno-main` / Mesa 26** (NDK, not the Linux
+container flags). The script probes `meson.options` and skips unknown names.
+`-Dosmesa=true` is **not** passed: that option does not exist on this tree
+(same error as GitHub Actions run 34319938380). Working `-D` set:
 
 ```text
--Dplatforms=android -Dandroid-stub=true -Dosmesa=true
--Dgallium-drivers=zink,freedreno -Dfreedreno-kmds=kgsl
--Dvulkan-drivers=freedreno -Degl=disabled -Dglx=disabled -Dllvm=disabled
+-Dbuildtype=release
+-Dplatforms=android
+-Dplatform-sdk-version=33
+-Dandroid-stub=true
+-Dandroid-strict=false
+-Dandroid-libbacktrace=disabled
+-Dandroid-libperfetto=disabled
+-Dxlib-lease=disabled
+-Degl=enabled
+-Degl-native-platform=android
+-Dgles2=enabled
+-Dgles1=disabled
+-Dopengl=true
+-Dgbm=disabled
+-Dglx=disabled
+-Dllvm=disabled
+-Dglvnd=disabled
+-Dlibunwind=disabled
+-Dmicrosoft-clc=disabled
+-Dvalgrind=disabled
+-Dintel-rt=disabled
+-Dlmsensors=disabled
+-Ddisplay-info=disabled
+-Dgallium-va=disabled
+-Dxmlconfig=disabled
+-Dexpat=disabled
+-Dgallium-drivers=zink,freedreno
+-Dfreedreno-kmds=kgsl
+-Dvulkan-drivers=freedreno
+-Dtools=
+-Degl-lib-suffix=_mesa
+-Dgles-lib-suffix=_mesa
+-Dunversion-libgallium=true
+-Dallow-fallback-for=libdrm
+-Dbuild-tests=false
+-Dgallium-rusticl=false
 ```
 
-That combination is [android-mesa-build](https://github.com/Vera-Firefly/android-mesa-build) plus lfdevs `-Dfreedreno-kmds=kgsl` and Turnip for the zip.
+That is [android-mesa-build](https://github.com/Vera-Firefly/android-mesa-build) (NDK android-stub, sdk 33, gallium zink+freedreno, kgsl) plus Mesa 26 Android EGL/GLES instead of OSMesa, lfdevs `-Dfreedreno-kmds=kgsl`, `_mesa` library suffixes (FCL Zink), and Turnip for the zip. `egl` / `gles2` are **feature** options (`enabled` / `disabled`), not booleans.
+
+If meson still reports `Unknown option`, the script drops that `-D` and retries.
+
+Libraries this Mesa generation installs (and the plugin packages):
+
+| DSO | role |
+|---|---|
+| `libEGL_mesa.so` | Mesa EGL (`egl-lib-suffix=_mesa`) |
+| `libGLESv2_mesa.so` | GLES2 entry library (`gles-lib-suffix=_mesa`) |
+| `libgallium_dri.so` | Gallium dri megadriver (Android unversions this) |
+| `libvulkan_freedreno.so` | Turnip (optional, AdrenoTools zip) |
 
 ## Layout
 
 ```text
 app/                         FCLRendererPlugin-style Android Gradle project
-  src/main/cpp/              OSMBridge + optional OSMesa stub (CMake/NDK)
-  src/main/jniLibs/arm64-v8a/  real libOSMesa.so from scripts/ (CI)
-scripts/build-mesa-android.sh  libdrm (KGSL) + Mesa NDK cross compile
+  src/main/cpp/              KGSL env constructor + optional EGL/GLES stubs
+  src/main/jniLibs/arm64-v8a/  real Mesa .so from scripts/ (CI)
+scripts/build-mesa-android.sh  libdrm + Mesa NDK cross compile
 .github/workflows/build.yml    Mesa + release APK + AdrenoTools zip
 ```
 
@@ -164,7 +210,8 @@ FCL loads `.so` files from a plugin APK’s `nativeLibraryDir` using the **Boat/
 
 - Mesa 3D — MIT, [lfdevs fork](https://github.com/lfdevs/mesa-for-android-container) / [upstream](https://gitlab.freedesktop.org/mesa/mesa)
 - Plugin metadata layout — [ShirosakiMio/FCLRendererPlugin](https://github.com/ShirosakiMio/FCLRendererPlugin)
-- OSMesa-on-FCL ABI — [Vera-Firefly/FCL-Mesa-Plugin](https://github.com/Vera-Firefly/FCL-Mesa-Plugin) / [android-mesa-build](https://github.com/Vera-Firefly/android-mesa-build)
+- Android NDK Mesa flags — [Vera-Firefly/android-mesa-build](https://github.com/Vera-Firefly/android-mesa-build) (OSMesa era) + Mesa `docs/android.rst`
+- FCL EGL desktop-GL renderer ABI — built-in Zink (`libEGL_mesa.so`, `opengles3_desktopgl*`) in [FCL-Team/FoldCraftLauncher](https://github.com/FCL-Team/FoldCraftLauncher)
 - FoldCraftLauncher plugin scan — [FCL-Team/FoldCraftLauncher](https://github.com/FCL-Team/FoldCraftLauncher)
 - Driver plugin / Turnip APK format — [FCL-Team/FCLDriverPlugin](https://github.com/FCL-Team/FCLDriverPlugin)
 - AdrenoTools zip — `schemaVersion` / `libraryName` as used by K11MCH1 / whitebelyash Turnip packages

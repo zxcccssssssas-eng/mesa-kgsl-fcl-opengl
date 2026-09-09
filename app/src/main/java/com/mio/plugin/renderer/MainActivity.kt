@@ -24,7 +24,8 @@ class MainActivity : Activity() {
                 then pick "Freedreno KGSL" as the renderer.
 
                 GPU: Qualcomm Adreno (6xx / 7xx / 8xx) via KGSL.
-                This is Mesa Gallium Freedreno, not GL4ES / MobileGlues.
+                Mesa Gallium Freedreno over Android EGL (libEGL_mesa.so),
+                not OSMesa (removed in Mesa 26) and not GL4ES / MobileGlues.
 
                 OpenGL 4.6 is requested via MESA_GL_VERSION_OVERRIDE.
                 The version string Minecraft shows still depends on
