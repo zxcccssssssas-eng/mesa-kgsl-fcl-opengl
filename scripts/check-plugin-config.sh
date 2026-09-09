@@ -38,7 +38,7 @@ check "manifest declares fclPlugin" grep -q 'android:name="fclPlugin"' "${manife
 check "manifest declares renderer meta-data" grep -q 'android:name="renderer"' "${manifest}"
 check "manifest declares boatEnv" grep -q 'android:name="boatEnv"' "${manifest}"
 check "manifest declares pojavEnv" grep -q 'android:name="pojavEnv"' "${manifest}"
-check "extractNativeLibs is true" grep -q 'android:extractNativeLibs="true"' "${manifest}"
+check "extractNativeLibs is false (16KB STORED jni)" grep -q 'android:extractNativeLibs="false"' "${manifest}"
 
 check "applicationIdSuffix is .freedreno.kgsl" grep -q 'applicationIdSuffix = ".freedreno.kgsl"' "${gradle}"
 check "plugin minSdk is 29" grep -q 'minSdk = 29' "${gradle}"

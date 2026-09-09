@@ -12,8 +12,8 @@ android {
         applicationId = "com.mio.plugin.renderer"
         minSdk = 29
         targetSdk = 34
-        versionCode = 3
-        versionName = "1.2.0"
+        versionCode = 4
+        versionName = "1.2.1"
         ndk {
             abiFilters += listOf("arm64-v8a")
         }
@@ -100,7 +100,7 @@ android {
 
     packaging {
         jniLibs {
-            // Uncompressed jni in APK (16 KB devices). extractNativeLibs still extracts for FCL.
+            // extractNativeLibs=false + useLegacyPackaging=false → STORED 16KB-aligned .so in APK (AGP 8).
             useLegacyPackaging = false
             keepDebugSymbols += "**/*.so"
         }
