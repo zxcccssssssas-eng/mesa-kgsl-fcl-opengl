@@ -812,6 +812,18 @@ EGLBoolean eglMakeCurrent(EGLDisplay dpy, EGLSurface draw, EGLSurface read, EGLC
     tls_ctx = c;
     tls_draw = sd;
     tls_read = sr;
+    static int logged_gl_info;
+    if (!logged_gl_info) {
+        logged_gl_info = 1;
+        typedef const unsigned char *(*get_string_fn)(unsigned int);
+        get_string_fn glGetString = (get_string_fn)mesa_egl.GetProcAddress("glGetString");
+        if (glGetString) {
+            SHIM_LOG("game context: GL_VERSION=%s GL_RENDERER=%s GL_VENDOR=%s",
+                     glGetString(0x1F02) ? (const char *)glGetString(0x1F02) : "?",
+                     glGetString(0x1F01) ? (const char *)glGetString(0x1F01) : "?",
+                     glGetString(0x1F00) ? (const char *)glGetString(0x1F00) : "?");
+        }
+    }
     return EGL_TRUE;
 }
 
@@ -956,7 +968,11 @@ __eglMustCastToProperFunctionPointerType eglGetProcAddress(const char *procname)
         if (strcmp(shim_procs[i].name, procname) == 0)
             return shim_procs[i].fn;
     }
-    return mesa_egl.GetProcAddress ? mesa_egl.GetProcAddress(procname) : NULL;
+    __eglMustCastToProperFunctionPointerType fn =
+        mesa_egl.GetProcAddress ? mesa_egl.GetProcAddress(procname) : NULL;
+    if (!fn && procname[0] == 'g' && procname[1] == 'l')
+        SHIM_ERR("eglGetProcAddress(%s) -> NULL", procname);
+    return fn;
 }
 
 /* ------------------------------------------------------------------ */
