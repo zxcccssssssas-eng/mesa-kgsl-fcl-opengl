@@ -20,6 +20,10 @@ check "Android Gradle project exists" test -f "${ROOT}/app/build.gradle.kts"
 check "FCL renderer manifest exists" test -f "${ROOT}/app/src/main/AndroidManifest.xml"
 check "OSMBridge source exists" test -f "${ROOT}/app/src/main/cpp/osmbridge.c"
 check "Mesa NDK build script exists" test -x "${ROOT}/scripts/build-mesa-android.sh" -o -f "${ROOT}/scripts/build-mesa-android.sh"
+check "libdrm meson flags are probed from meson_options.txt" \
+  grep -q 'drm_has_option' "${ROOT}/scripts/build-mesa-android.sh"
+check "libdrm setup does not hardcode -Dfreedreno=enabled as a meson arg" \
+  bash -c "! grep -qE '^[[:space:]]+-Dfreedreno=enabled(\\\\|$)' '${ROOT}/scripts/build-mesa-android.sh'"
 
 manifest="${ROOT}/app/src/main/AndroidManifest.xml"
 gradle="${ROOT}/app/build.gradle.kts"

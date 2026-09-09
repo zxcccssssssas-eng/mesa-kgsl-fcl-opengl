@@ -119,6 +119,21 @@ export MESA_REF=adreno-main
 ./scripts/check-plugin-config.sh app/build/outputs/apk/release/*.apk
 ```
 
+libdrm (generic static, NDK) meson flags — current upstream **removed**
+`freedreno` / `freedreno-kgsl`. The script probes `meson_options.txt` and only
+passes those if present. On libdrm 2.4.134 that is:
+
+```text
+-Ddefault_library=static
+-Dintel=disabled -Dradeon=disabled -Damdgpu=disabled -Dnouveau=disabled
+-Dvmwgfx=disabled -Domap=disabled -Dexynos=disabled -Dtegra=disabled
+-Dvc4=disabled -Detnaviv=disabled
+-Dcairo-tests=disabled -Dman-pages=disabled -Dvalgrind=disabled
+-Dtests=false -Dinstall-test-programs=false -Dudev=false
+```
+
+KGSL is enabled in **Mesa**, not libdrm.
+
 Mesa meson flags (NDK, not the Linux container flags):
 
 ```text
