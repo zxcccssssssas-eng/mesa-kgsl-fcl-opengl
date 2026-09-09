@@ -171,7 +171,6 @@ GALLIUM_DRIVER=freedreno
 MESA_LOADER_DRIVER_OVERRIDE=kgsl
 FD_FORCE_KGSL=1
 LIBGL_ES=3
-mesa_glthread=true
 DLOPEN=libfreedreno_kgsl_init.so,libgallium_dri.so,libEGL_mesa.so,libGLESv2_mesa.so
 POJAV_RENDERER=opengles3_desktopgl   # pojav; FCL binds EGL_OPENGL_API
 ```

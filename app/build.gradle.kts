@@ -12,8 +12,8 @@ android {
         applicationId = "com.mio.plugin.renderer"
         minSdk = 29
         targetSdk = 34
-        versionCode = 8
-        versionName = "1.2.5"
+        versionCode = 9
+        versionName = "1.2.6"
         ndk {
             abiFilters += listOf("arm64-v8a")
         }
@@ -65,7 +65,6 @@ android {
                 "GALLIUM_DRIVER" to "freedreno",
                 "MESA_LOADER_DRIVER_OVERRIDE" to "kgsl",
                 "FD_FORCE_KGSL" to "1",
-                "mesa_glthread" to "true",
                 "DLOPEN" to dlopenLibs,
             ).entries.joinToString(":") { "${it.key}=${it.value}" }
 
@@ -75,7 +74,6 @@ android {
                 "GALLIUM_DRIVER" to "freedreno",
                 "MESA_LOADER_DRIVER_OVERRIDE" to "kgsl",
                 "FD_FORCE_KGSL" to "1",
-                "mesa_glthread" to "true",
                 "DLOPEN" to dlopenLibs,
             ).entries.joinToString(":") { "${it.key}=${it.value}" }
 
