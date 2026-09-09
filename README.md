@@ -311,3 +311,15 @@ FCL loads `.so` files from a plugin APK’s `nativeLibraryDir` using the **Boat/
 - FoldCraftLauncher plugin scan — [FCL-Team/FoldCraftLauncher](https://github.com/FCL-Team/FoldCraftLauncher)
 - Driver plugin / Turnip APK format — [FCL-Team/FCLDriverPlugin](https://github.com/FCL-Team/FCLDriverPlugin)
 - AdrenoTools zip — `schemaVersion` / `libraryName` as used by K11MCH1 / whitebelyash Turnip packages
+- EGL zero-copy presentation design (AHardwareBuffer -> `eglGetNativeClientBufferANDROID` -> `eglCreateImageKHR` -> fullscreen blit + `EGL_ANDROID_native_fence_sync`) — [utkarshdalal/GameNative](https://github.com/utkarshdalal/GameNative) (`GPUImage` / `BlitConverter`)
+
+## FCLProbe diagnostic
+
+`libfreedreno_kgsl_init.so` runs a one-shot diagnostic in its constructor
+(logcat tag `FCLProbe`, opt-out with `FCL_PROBE=0`): it allocates a small
+`AHardwareBuffer`, creates a vendor EGL display and checks whether the vendor
+driver accepts it as an `EGLImage` (`eglGetNativeClientBufferANDROID` +
+`eglCreateImageKHR`). That is the zero-copy path the planned EGL presentation
+shim needs; the probe result decides whether the shim can use it or has to
+fall back to a PBO readback. It only logs, never aborts, and leaves the
+process-wide EGL display initialized for FCL.

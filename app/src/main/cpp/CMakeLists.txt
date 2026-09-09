@@ -3,6 +3,9 @@ project(fcl_freedreno_kgsl C)
 
 add_library(freedreno_kgsl_init SHARED kgsl_init.c)
 target_compile_options(freedreno_kgsl_init PRIVATE -fvisibility=hidden -Wall -Wextra)
+# FCLProbe: AHardwareBuffer (libnativewindow) + __android_log_print (liblog) +
+# dlopen of the vendor EGL (libdl).
+target_link_libraries(freedreno_kgsl_init PRIVATE nativewindow log dl)
 
 # Tiny EGL/GLES/gallium placeholders so metadata-only APKs still contain the
 # library names FoldCraftLauncher will dlopen. scripts/build-mesa-android.sh

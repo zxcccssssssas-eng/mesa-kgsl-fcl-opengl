@@ -9,6 +9,9 @@ import android.widget.TextView
 class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Loading this library runs the one-shot FCLProbe diagnostic in its
+        // constructor (vendor EGL AHardwareBuffer import check, tag FCLProbe).
+        runCatching { System.loadLibrary("freedreno_kgsl_init") }
         val pad = (16 * resources.displayMetrics.density).toInt()
         val text = TextView(this).apply {
             setPadding(pad, pad, pad, pad)
