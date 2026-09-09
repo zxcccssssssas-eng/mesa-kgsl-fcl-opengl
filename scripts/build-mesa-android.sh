@@ -115,8 +115,8 @@ pkgconfig = ['env', 'PKG_CONFIG_LIBDIR=${pkgconfig_libdir}', '/usr/bin/pkg-confi
 [built-in options]
 c_args = ['-O3', '-fPIC', '-DVK_USE_PLATFORM_ANDROID_KHR', '-fno-strict-aliasing']
 cpp_args = ['-O3', '-fPIC', '-DVK_USE_PLATFORM_ANDROID_KHR', '-fno-exceptions', '-fno-unwind-tables', '-Wno-c++11-narrowing']
-c_link_args = ['-fuse-ld=lld', '-Wl,-z,max-page-size=16384']
-cpp_link_args = ['-fuse-ld=lld', '-static-libstdc++', '-Wl,-z,max-page-size=16384']
+c_link_args = ['-fuse-ld=lld', '-Wl,-z,max-page-size=16384', '-Wl,-rpath,$$ORIGIN']
+cpp_link_args = ['-fuse-ld=lld', '-static-libstdc++', '-Wl,-z,max-page-size=16384', '-Wl,-rpath,$$ORIGIN']
 
 [host_machine]
 system = 'android'
@@ -424,6 +424,21 @@ package_libs() {
       "${OUT_DIST}/turnip-freedreno-kgsl-adrenotools.zip"
   else
     log "Turnip libvulkan_freedreno.so not built; skipping AdrenoTools zip"
+  fi
+
+  # Ensure libGLESv2_mesa can resolve libgallium_dri.so next to it when
+  # LWJGL dlopens the absolute plugin path (no implicit $ORIGIN otherwise).
+  if ! command -v patchelf >/dev/null 2>&1; then
+    sudo apt-get install -y patchelf >/dev/null 2>&1 || true
+  fi
+  if command -v patchelf >/dev/null 2>&1; then
+    for so in "${OUT_JNI}"/*.so; do
+      [[ -f "${so}" ]] || continue
+      patchelf --set-rpath '$ORIGIN' "${so}" 2>/dev/null || true
+    done
+    log "patchelf DT_RUNPATH=\$ORIGIN on ${OUT_JNI}"
+  else
+    log "WARN: patchelf unavailable; DT_RUNPATH may be missing"
   fi
 
   if command -v llvm-strip >/dev/null 2>&1; then

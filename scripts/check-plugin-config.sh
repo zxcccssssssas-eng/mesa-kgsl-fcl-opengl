@@ -38,19 +38,20 @@ check "manifest declares fclPlugin" grep -q 'android:name="fclPlugin"' "${manife
 check "manifest declares renderer meta-data" grep -q 'android:name="renderer"' "${manifest}"
 check "manifest declares boatEnv" grep -q 'android:name="boatEnv"' "${manifest}"
 check "manifest declares pojavEnv" grep -q 'android:name="pojavEnv"' "${manifest}"
-check "extractNativeLibs is false (16KB STORED jni)" grep -q 'android:extractNativeLibs="false"' "${manifest}"
+check "extractNativeLibs is true" grep -q 'android:extractNativeLibs="true"' "${manifest}"
 
 check "applicationIdSuffix is .freedreno.kgsl" grep -q 'applicationIdSuffix = ".freedreno.kgsl"' "${gradle}"
 check "plugin minSdk is 29" grep -q 'minSdk = 29' "${gradle}"
-check "renderer id is FreedrenoKGSL EGL/GLES mesa" grep -q 'FreedrenoKGSL:/libGLESv2_mesa.so:/libEGL_mesa.so' "${gradle}"
+check "renderer id is FreedrenoKGSL EGL/GLES mesa" grep -q 'FreedrenoKGSL:libGLESv2_mesa.so:/libEGL_mesa.so' "${gradle}"
 check "GALLIUM_DRIVER=freedreno" grep -q '"GALLIUM_DRIVER" to "freedreno"' "${gradle}"
 check "MESA_LOADER_DRIVER_OVERRIDE=kgsl" grep -q '"MESA_LOADER_DRIVER_OVERRIDE" to "kgsl"' "${gradle}"
 check "POJAV_RENDERER=opengles3_desktopgl" grep -q '"POJAV_RENDERER" to "opengles3_desktopgl"' "${gradle}"
 check "pojavEnv DLOPEN includes libEGL_mesa.so" grep -q 'libEGL_mesa.so' "${gradle}"
 check "does not force MESA_GL_VERSION_OVERRIDE=4.6" bash -c "! grep -qE '\"MESA_GL_VERSION_OVERRIDE\"[[:space:]]+to[[:space:]]+\"4\.6\"' '${gradle}'"
-check "jniLibs uncompressed packaging" grep -q 'useLegacyPackaging = false' "${gradle}"
+check "legacy JNI packaging enabled" grep -q 'useLegacyPackaging = true' "${gradle}"
 check "NDK flexible page sizes enabled" grep -q 'ANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON' "${gradle}"
 check "Mesa linked with 16KB max-page-size" grep -q 'max-page-size=16384' "${ROOT}/scripts/build-mesa-android.sh"
+check "Mesa link uses \$ORIGIN rpath" grep -q 'rpath' "${ROOT}/scripts/build-mesa-android.sh"
 
 # Probe Mesa 26-style meson.options: osmesa must not be emitted.
 mesa_probe_dir="$(mktemp -d)"

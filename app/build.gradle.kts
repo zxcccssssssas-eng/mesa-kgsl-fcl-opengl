@@ -12,8 +12,8 @@ android {
         applicationId = "com.mio.plugin.renderer"
         minSdk = 29
         targetSdk = 34
-        versionCode = 4
-        versionName = "1.2.1"
+        versionCode = 5
+        versionName = "1.2.2"
         ndk {
             abiFilters += listOf("arm64-v8a")
         }
@@ -49,7 +49,7 @@ android {
             // Mesa 26 dropped OSMesa. Use Mesa Android EGL + GLES libs and
             // POJAV_RENDERER=opengles3_desktopgl so FCL binds EGL_OPENGL_API
             // (desktop GL) via the GL bridge — not OSMBridge.
-            manifestPlaceholders["renderer"] = "FreedrenoKGSL:/libGLESv2_mesa.so:/libEGL_mesa.so"
+            manifestPlaceholders["renderer"] = "FreedrenoKGSL:libGLESv2_mesa.so:/libEGL_mesa.so"
 
             // boatEnv / pojavEnv are KEY=val:KEY2=val2
             // DLOPEN=liba.so,libb.so loads extra native libs from this plugin APK.
@@ -100,8 +100,9 @@ android {
 
     packaging {
         jniLibs {
-            // extractNativeLibs=false + useLegacyPackaging=false → STORED 16KB-aligned .so in APK (AGP 8).
-            useLegacyPackaging = false
+            // extractNativeLibs=true so FCL can dlopen real extracted files from the plugin APK;
+            // keep 16KB ELF (max-page-size) + \$ORIGIN rpath for libgallium_dri.
+            useLegacyPackaging = true
             keepDebugSymbols += "**/*.so"
         }
     }

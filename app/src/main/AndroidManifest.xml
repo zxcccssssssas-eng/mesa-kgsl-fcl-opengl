@@ -3,7 +3,7 @@
 
     <application
         android:allowBackup="true"
-        android:extractNativeLibs="false"
+        android:extractNativeLibs="true"
         android:icon="@drawable/img_app"
         android:label="@string/app_name"
         android:supportsRtl="true">
