@@ -28,6 +28,8 @@ check "libdrm setup does not hardcode -Dfreedreno=enabled as a meson arg" \
   bash -c "! grep -qE '^[[:space:]]+-Dfreedreno=enabled(\\\\|$)' '${ROOT}/scripts/build-mesa-android.sh'"
 check "Mesa setup does not hardcode -Dosmesa=true" \
   bash -c "! grep -qE '^[[:space:]]+-Dosmesa=true(\\\\|$)' '${ROOT}/scripts/build-mesa-android.sh'"
+check "NDK clang target defaults to API 29" \
+  grep -q 'SDK_VER="${SDK_VER:-29}"' "${ROOT}/scripts/build-mesa-android.sh"
 
 manifest="${ROOT}/app/src/main/AndroidManifest.xml"
 gradle="${ROOT}/app/build.gradle.kts"
@@ -39,6 +41,7 @@ check "manifest declares pojavEnv" grep -q 'android:name="pojavEnv"' "${manifest
 check "extractNativeLibs is true" grep -q 'android:extractNativeLibs="true"' "${manifest}"
 
 check "applicationIdSuffix is .freedreno.kgsl" grep -q 'applicationIdSuffix = ".freedreno.kgsl"' "${gradle}"
+check "plugin minSdk is 29" grep -q 'minSdk = 29' "${gradle}"
 check "renderer id is FreedrenoKGSL EGL/GLES mesa" grep -q 'FreedrenoKGSL:libGLESv2_mesa.so:libEGL_mesa.so' "${gradle}"
 check "GALLIUM_DRIVER=freedreno" grep -q '"GALLIUM_DRIVER" to "freedreno"' "${gradle}"
 check "MESA_LOADER_DRIVER_OVERRIDE=kgsl" grep -q '"MESA_LOADER_DRIVER_OVERRIDE" to "kgsl"' "${gradle}"

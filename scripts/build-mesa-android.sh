@@ -29,7 +29,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK="${WORK_DIR:-$ROOT/.native-build}"
 NDK="${NDK:-${ANDROID_NDK_HOME:-${ANDROID_NDK:-}}}"
-SDK_VER="${SDK_VER:-26}"
+# NDK clang target. Must be >= 29: Mesa 26 Turnip's vk_android.c calls
+# AHardwareBuffer_isSupported (API 29). Vera-Firefly/android-mesa-build uses 29.
+# API 26 (plugin minSdk historically) fails with:
+#   error: 'AHardwareBuffer_isSupported' is unavailable: introduced in Android 29
+SDK_VER="${SDK_VER:-29}"
 MESA_REF="${MESA_REF:-adreno-main}"
 MESA_REPO="${MESA_REPO:-https://github.com/lfdevs/mesa-for-android-container.git}"
 DRM_REPO="${DRM_REPO:-https://gitlab.freedesktop.org/mesa/drm.git}"
