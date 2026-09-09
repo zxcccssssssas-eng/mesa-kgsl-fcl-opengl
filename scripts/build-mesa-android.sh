@@ -15,6 +15,9 @@
 #     and FCL's JVM classloader namespace cannot resolve them at runtime)
 #   - patches Mesa's Android EGL platform to fall back to /dev/kgsl-3d0
 #     (Qualcomm Android devices have no app-accessible DRM render node)
+#   - patches Mesa's _eglIsApiValid() so EGL_OPENGL_API is accepted on Android
+#     (Mesa gates desktop GL off for Android builds; FCL's
+#     POJAV_RENDERER=opengles3_desktopgl needs it)
 #
 # Proven flag sources for this Mesa generation:
 #   - Mesa docs/android.rst (NDK: -Dplatforms=android -Dandroid-stub=true
@@ -529,6 +532,50 @@ else:
 PY
 }
 
+# Mesa gates EGL_OPENGL_API off on Android builds:
+#   src/egl/main/eglcurrent.h: #if HAVE_OPENGL && !DETECT_OS_ANDROID
+# so eglBindAPI(EGL_OPENGL_API) fails with EGL_BAD_PARAMETER (0x300C) and
+# disp->ClientAPIs only advertises EGL_OPENGL_ES_*, which breaks FCL's
+# POJAV_RENDERER=opengles3_desktopgl path:
+#   EGLBridge: bind failed: 0x3000 / eglChooseConfig -> 0 configs
+# The lfdevs "mesa-for-android-container" builds get desktop GL because they
+# are compiled with a Linux toolchain (DETECT_OS_ANDROID=0); this NDK build
+# targets Android, so drop the guard. The GLESv2 DSO already exports the
+# desktop GL entry points (Mesa built with -Dopengl=true).
+patch_mesa_android_desktopgl() {
+  local src="$1"
+  python3 - "$src" <<'PY'
+import pathlib, sys
+
+src = pathlib.Path(sys.argv[1])
+path = src / "src" / "egl" / "main" / "eglcurrent.h"
+text = path.read_text(encoding="utf-8")
+marker = "OpenGL is accepted on Android for this NDK build"
+old = """#if HAVE_OPENGL && !DETECT_OS_ANDROID
+   /* OpenGL is not a valid/supported API on Android */
+   if (api == EGL_OPENGL_API)
+      return true;
+#endif"""
+new = """#if HAVE_OPENGL
+   /* OpenGL is accepted on Android for this NDK build: the renderer plugin
+    * is used by FCL's opengles3_desktopgl path, which needs EGL_OPENGL_API.
+    * Container Mesa builds get this because they are compiled with a Linux
+    * toolchain (DETECT_OS_ANDROID=0).
+    */
+   if (api == EGL_OPENGL_API)
+      return true;
+#endif"""
+
+if marker in text:
+    print("eglcurrent.h already patched (android desktop GL)", file=sys.stderr)
+elif old in text:
+    path.write_text(text.replace(old, new, 1), encoding="utf-8")
+    print("patched src/egl/main/eglcurrent.h (EGL_OPENGL_API on Android)", file=sys.stderr)
+else:
+    sys.exit("error: cannot patch eglcurrent.h: unexpected upstream layout")
+PY
+}
+
 build_mesa() {
   local src="${MESA_SRC:-$WORK/mesa}"
   if [[ ! -d "${src}/.git" ]]; then
@@ -536,6 +583,7 @@ build_mesa() {
   fi
   patch_mesa_android_stub "${src}"
   patch_mesa_android_kgsl "${src}"
+  patch_mesa_android_desktopgl "${src}"
   write_cross_file "${WORK}/android-mesa.ini" "${DRM_PREFIX}/lib/pkgconfig"
   export PKG_CONFIG_LIBDIR="${DRM_PREFIX}/lib/pkgconfig"
   export PKG_CONFIG_PATH="${DRM_PREFIX}/lib/pkgconfig"

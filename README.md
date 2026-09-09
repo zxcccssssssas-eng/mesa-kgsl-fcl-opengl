@@ -123,6 +123,31 @@ Fix: `scripts/build-mesa-android.sh` patches
 `/dev/kgsl-3d0`, selects the `kgsl` DRI driver and creates the screen, so
 `eglGetDisplay(EGL_DEFAULT_DISPLAY)` + Android window surfaces keep working.
 
+### Desktop OpenGL API missing on Android (`EGL_BAD_PARAMETER`)
+
+After the KGSL fallback the display initializes, but Mesa still refuses desktop
+OpenGL on Android builds:
+
+```text
+CLIENT_APIS: OpenGL_ES          (no OpenGL)
+eglBindAPI(EGL_OPENGL_API) -> EGL_FALSE, error 0x300C (EGL_BAD_PARAMETER)
+eglChooseConfig(EGL_OPENGL_BIT) -> 0 configs
+```
+
+Root cause: `src/egl/main/eglcurrent.h` gates the API on
+`#if HAVE_OPENGL && !DETECT_OS_ANDROID` — "OpenGL is not a valid/supported API
+on Android". Container Mesa builds (lfdevs) get desktop GL because they are
+compiled with a Linux toolchain (`DETECT_OS_ANDROID=0`); this NDK build targets
+Android, so the guard applies even though Mesa was configured with
+`-Dopengl=true` and `libGLESv2_mesa.so` exports the desktop GL entry points.
+
+Fix: the build script patches `_eglIsApiValid()` to accept `EGL_OPENGL_API` on
+Android too. `st_api_query_versions()` then reports the desktop GL versions the
+Freedreno/KGSL screen supports, `disp->ClientAPIs` gains `EGL_OPENGL_BIT`, and
+FCL's `POJAV_RENDERER=opengles3_desktopgl` path can bind desktop GL and create
+a context (the requested `EGL_CONTEXT_CLIENT_VERSION=3` is only a minimum —
+Mesa creates the highest version the driver supports).
+
 ### Renderer does not appear / old renderer after updating the plugin
 
 FCL scans plugin packages once per process. After installing or updating this
