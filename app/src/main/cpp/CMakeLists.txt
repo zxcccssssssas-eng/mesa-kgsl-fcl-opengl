@@ -22,9 +22,17 @@ if(FCL_STUB_MESA_EGL)
     add_library(gallium_dri SHARED gallium_stub.c)
     target_compile_options(gallium_dri PRIVATE -fvisibility=default -Wall)
 else()
-    # Real Mesa DSOs are in jniLibs (libEGL_mesa_core.so holds the renamed
-    # Mesa EGL). Ship the presentation shim under the name FCL dlopens.
+    # Real Mesa DSOs are in jniLibs (libEGL_mesa_core.so / libGLESv2_mesa_core.so
+    # hold the renamed Mesa libs). Ship our shims under the names FCL dlopens:
+    #  - libEGL_mesa.so      presentation shim (Mesa offscreen -> vendor window)
+    #  - libGLESv2_mesa.so   GL entry-point shim (glXGetProcAddress -> Mesa EGL
+    #                        dispatch, so the game's GL state matches the EGL
+    #                        context the presentation shim makes current)
     add_library(EGL_mesa SHARED egl_shim.c)
     target_compile_options(EGL_mesa PRIVATE -fvisibility=default -Wall -Wextra)
     target_link_libraries(EGL_mesa PRIVATE nativewindow log dl)
+
+    add_library(GLESv2_mesa SHARED gles_shim.c)
+    target_compile_options(GLESv2_mesa PRIVATE -fvisibility=default -Wall -Wextra)
+    target_link_libraries(GLESv2_mesa PRIVATE log dl)
 endif()

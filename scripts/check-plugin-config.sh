@@ -76,6 +76,12 @@ check "EGL shim source present" \
   test -f "${ROOT}/app/src/main/cpp/egl_shim.c"
 check "EGL shim built as libEGL_mesa.so" \
   grep -q 'add_library(EGL_mesa SHARED egl_shim.c)' "${ROOT}/app/src/main/cpp/CMakeLists.txt"
+check "GLES entry-point shim source present" \
+  test -f "${ROOT}/app/src/main/cpp/gles_shim.c"
+check "GLES shim exports glXGetProcAddress" \
+  grep -q 'glXGetProcAddress' "${ROOT}/app/src/main/cpp/gles_shim.c"
+check "build script renames Mesa GLES for the shim" \
+  grep -q 'libGLESv2_mesa_core.so' "${ROOT}/scripts/build-mesa-android.sh"
 check "build script enables EGL_OPENGL_API on Android" \
   grep -q 'patch_mesa_android_desktopgl' "${ROOT}/scripts/build-mesa-android.sh"
 check "desktop GL patch touches _eglIsApiValid" \

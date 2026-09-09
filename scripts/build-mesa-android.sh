@@ -727,11 +727,18 @@ package_libs() {
     log "warning: libgallium*.so not found; EGL may fail to load the dri driver"
   fi
 
-  # The plugin ships libEGL_mesa.so as the EGL presentation shim (built by
-  # CMake). Rename the real Mesa EGL so the shim can dlopen it next to itself.
+  # The plugin ships libEGL_mesa.so / libGLESv2_mesa.so as shims (built by
+  # CMake). Rename the real Mesa libs so the shims can dlopen them next to
+  # themselves:
+  #   libEGL_mesa.so      -> libEGL_mesa_core.so     (presentation shim)
+  #   libGLESv2_mesa.so   -> libGLESv2_mesa_core.so  (GL entry-point shim)
   if [[ -f "${OUT_JNI}/libEGL_mesa.so" ]]; then
     mv -f "${OUT_JNI}/libEGL_mesa.so" "${OUT_JNI}/libEGL_mesa_core.so"
     log "renamed libEGL_mesa.so -> libEGL_mesa_core.so (EGL shim slot)"
+  fi
+  if [[ -f "${OUT_JNI}/libGLESv2_mesa.so" ]]; then
+    mv -f "${OUT_JNI}/libGLESv2_mesa.so" "${OUT_JNI}/libGLESv2_mesa_core.so"
+    log "renamed libGLESv2_mesa.so -> libGLESv2_mesa_core.so (GLES shim slot)"
   fi
 
   local turnip=""
