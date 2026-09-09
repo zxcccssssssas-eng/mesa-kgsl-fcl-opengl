@@ -31,33 +31,6 @@
 #define PROBE_LOG(...) __android_log_print(ANDROID_LOG_INFO, PROBE_TAG, __VA_ARGS__)
 #define PROBE_ERR(...) __android_log_print(ANDROID_LOG_ERROR, PROBE_TAG, __VA_ARGS__)
 
-/* Mesa was built against the Android stub headers, whose ANativeWindowBuffer is
- * 168 bytes (magic 0x5f626672). The NDK does not expose the struct, so mirror
- * the layout here (magic/version/handle offsets match the platform header). */
-#define ANDROID_NATIVE_BUFFER_MAGIC 0x5f626672u
-
-typedef struct {
-    int magic;
-    int version;
-    void *reserved[4];
-    void (*incRef)(void *base);
-    void (*decRef)(void *base);
-} probe_native_base_t;
-
-typedef struct {
-    probe_native_base_t common;
-    int width;
-    int height;
-    int stride;
-    int format;
-    int usage;
-    void *reserved[2];
-    const void *handle;
-    void *reserved_proc[8];
-} probe_anwb_t;
-
-static void probe_noop_ref(void *base) { (void)base; }
-
 struct egl_api {
     void *handle;
     EGLDisplay (*get_display)(EGLNativeDisplayType);
@@ -70,6 +43,7 @@ struct egl_api {
     EGLBoolean (*destroy_context)(EGLDisplay, EGLContext);
     EGLBoolean (*destroy_surface)(EGLDisplay, EGLSurface);
     __eglMustCastToProperFunctionPointerType (*get_proc_address)(const char *);
+    const char *(*query_string)(EGLDisplay, EGLint);
     EGLint (*get_error)(void);
     EGLImageKHR (*create_image)(EGLDisplay, EGLContext, EGLenum, EGLClientBuffer, const EGLint *);
     EGLClientBuffer (*get_native_client_buffer)(AHardwareBuffer *);
@@ -93,6 +67,7 @@ static int egl_api_load(struct egl_api *v, const char *path) {
     v->destroy_context = (void *)dlsym(v->handle, "eglDestroyContext");
     v->destroy_surface = (void *)dlsym(v->handle, "eglDestroySurface");
     v->get_proc_address = (void *)dlsym(v->handle, "eglGetProcAddress");
+    v->query_string = (void *)dlsym(v->handle, "eglQueryString");
     v->get_error = (void *)dlsym(v->handle, "eglGetError");
     if (!v->get_display || !v->initialize || !v->get_proc_address || !v->get_error) {
         PROBE_ERR("%s is missing core EGL entry points", path);
@@ -112,7 +87,9 @@ static AHardwareBuffer *probe_alloc_ahb(AHardwareBuffer_Desc *out) {
         /* NDK public header exposes R8G8B8A8_UNORM; B8G8R8A8 (5) is HAL-only. */
         .format = AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM,
         .usage = AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE |
-                 AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT,
+                 AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT |
+                 AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN |
+                 AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN,
     };
     AHardwareBuffer *ahb = NULL;
     int rc = AHardwareBuffer_allocate(&desc, &ahb);
@@ -196,13 +173,24 @@ out:
     if (ahb) AHardwareBuffer_release(ahb);
 }
 
-/* AHardwareBuffer_getNativeHandle() is a libnativewindow symbol but is not
- * declared in the NDK r27 headers, so resolve it at runtime. */
-static const void *probe_ahb_handle(AHardwareBuffer *ahb) {
-    typedef const void *(*get_native_handle_fn)(const AHardwareBuffer *);
-    static get_native_handle_fn fn;
-    if (!fn) fn = (get_native_handle_fn)dlsym(RTLD_DEFAULT, "AHardwareBuffer_getNativeHandle");
-    return fn ? fn(ahb) : NULL;
+/* Platform ANativeWindowBuffer wrapper for an AHardwareBuffer, as returned by
+ * the vendor EGL's eglGetNativeClientBufferANDROID(). */
+static EGLClientBuffer probe_platform_anwb(AHardwareBuffer *ahb) {
+    static EGLClientBuffer (*fn)(AHardwareBuffer *);
+    if (!fn) {
+        void *h = dlopen("/system/lib64/libEGL.so", RTLD_LOCAL | RTLD_LAZY);
+        if (!h) h = dlopen("libEGL.so", RTLD_LOCAL | RTLD_LAZY);
+        if (!h) return NULL;
+        __eglMustCastToProperFunctionPointerType p =
+            (__eglMustCastToProperFunctionPointerType)dlsym(h, "eglGetNativeClientBufferANDROID");
+        if (!p) {
+            void *(*gpa)(const char *) = (void *)dlsym(h, "eglGetProcAddress");
+            if (gpa) p = (__eglMustCastToProperFunctionPointerType)gpa("eglGetNativeClientBufferANDROID");
+        }
+        if (!p) return NULL;
+        fn = (EGLClientBuffer (*)(AHardwareBuffer *))p;
+    }
+    return fn(ahb);
 }
 
 /* 2. Mesa EGL: AHB -> FBO render target (offscreen render -> shared AHB) */
@@ -210,7 +198,6 @@ static void probe_mesa_render_into_ahb(void) {
     struct egl_api m;
     AHardwareBuffer *ahb = NULL;
     AHardwareBuffer_Desc desc;
-    probe_anwb_t anwb;
     EGLDisplay dpy = EGL_NO_DISPLAY;
     EGLContext ctx = EGL_NO_CONTEXT;
     EGLSurface surf = EGL_NO_SURFACE;
@@ -260,16 +247,16 @@ static void probe_mesa_render_into_ahb(void) {
 
     ahb = probe_alloc_ahb(&desc);
     if (!ahb) return;
-    const void *handle = probe_ahb_handle(ahb);
-    if (!handle) {
-        PROBE_ERR("mesa: cannot resolve AHardwareBuffer_getNativeHandle");
-        goto out;
-    }
 
     dpy = m.get_display(EGL_DEFAULT_DISPLAY);
     if (dpy == EGL_NO_DISPLAY || m.initialize(dpy, NULL, NULL) != EGL_TRUE) {
         PROBE_ERR("mesa eglInitialize failed: err=0x%x", m.get_error());
         goto out;
+    }
+    if (m.query_string) {
+        const char *exts = m.query_string(dpy, EGL_EXTENSIONS);
+        PROBE_LOG("mesa: EGL_EXT_image_dma_buf_import=%s",
+                  (exts && strstr(exts, "EGL_EXT_image_dma_buf_import")) ? "yes" : "no");
     }
     m.bind_api(EGL_OPENGL_API);
     EGLint cfg_attribs[] = {
@@ -294,19 +281,17 @@ static void probe_mesa_render_into_ahb(void) {
         goto out;
     }
 
-    memset(&anwb, 0, sizeof(anwb));
-    anwb.common.magic = (int)ANDROID_NATIVE_BUFFER_MAGIC;
-    anwb.common.version = (int)sizeof(anwb);
-    anwb.common.incRef = probe_noop_ref;
-    anwb.common.decRef = probe_noop_ref;
-    anwb.width = (int)desc.width;
-    anwb.height = (int)desc.height;
-    anwb.stride = (int)desc.stride;
-    anwb.format = (int)desc.format;
-    anwb.usage = (int)desc.usage;
-    anwb.handle = handle;
-
-    img = m.create_image(dpy, EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID, (EGLClientBuffer)&anwb, NULL);
+    /* Use the platform ANativeWindowBuffer wrapper for this AHB instead of a
+     * hand-built struct: Mesa's droid_create_image_khr() calls
+     * ANativeWindowBuffer_getHardwareBuffer() and AHardwareBuffer_acquire(),
+     * which require a real platform buffer. The vendor EGL returns exactly
+     * that wrapper from eglGetNativeClientBufferANDROID(). */
+    EGLClientBuffer anwb = probe_platform_anwb(ahb);
+    if (!anwb) {
+        PROBE_ERR("mesa: no platform ANativeWindowBuffer for AHB");
+        goto out;
+    }
+    img = m.create_image(dpy, EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID, anwb, NULL);
     PROBE_LOG("mesa: AHB import image=%p err=0x%x", (void *)img, m.get_error());
     if (img == EGL_NO_IMAGE_KHR) goto out;
 

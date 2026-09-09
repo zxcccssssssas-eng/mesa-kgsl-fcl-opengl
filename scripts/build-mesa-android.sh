@@ -18,6 +18,10 @@
 #   - patches Mesa's _eglIsApiValid() so EGL_OPENGL_API is accepted on Android
 #     (Mesa gates desktop GL off for Android builds; FCL's
 #     POJAV_RENDERER=opengles3_desktopgl needs it)
+#   - patches Mesa's freedreno screen caps so the KGSL screen advertises
+#     DRM_PRIME_CAP_IMPORT|EXPORT (drmGetCap() fails on a KGSL char device, so
+#     caps.dmabuf stayed 0 and the DRI frontend disabled dma-buf import, which
+#     broke EGL window surfaces and AHardwareBuffer/EGLImage imports)
 #
 # Proven flag sources for this Mesa generation:
 #   - Mesa docs/android.rst (NDK: -Dplatforms=android -Dandroid-stub=true
@@ -576,6 +580,55 @@ else:
 PY
 }
 
+# Mesa's u_init_pipe_screen_caps() derives caps.dmabuf from
+# drmGetCap(fd, DRM_CAP_PRIME), but the freedreno KGSL backend opens a KGSL
+# character device (/dev/kgsl-3d0), not a DRM node, so drmGetCap() fails and
+# caps.dmabuf stays 0. dri_screen.c then leaves dmabuf_import/has_dmabuf false
+# and every dma-buf import goes through dri2_from_dma_bufs()'s early
+# "if (!screen->dmabuf_import) return NULL" (silent EGL_BAD_PARAMETER), which
+# breaks:
+#   - EGL window surfaces on Android (droid_create_image_from_native_buffer)
+#   - AHardwareBuffer / EGL_NATIVE_BUFFER_ANDROID imports (EGLImage)
+# KGSL advertises FD_FEATURE_IMPORT_DMABUF and implements both directions
+# (kgsl_bo_from_dmabuf / kgsl_bo_dmabuf), so set the caps explicitly.
+patch_mesa_freedreno_kgsl_dmabuf() {
+  local src="$1"
+  python3 - "$src" <<'PYEOF'
+import pathlib, sys
+
+src = pathlib.Path(sys.argv[1])
+path = src / "src" / "gallium" / "drivers" / "freedreno" / "freedreno_screen.c"
+text = path.read_text(encoding="utf-8")
+marker = "KGSL advertises FD_FEATURE_IMPORT_DMABUF"
+old = """   u_init_pipe_screen_caps(&screen->base, 1);
+
+   /* this is probably not totally correct.. but it's a start: */
+"""
+new = """   u_init_pipe_screen_caps(&screen->base, 1);
+
+   /* KGSL is a character device, not a DRM device, so
+    * u_init_pipe_screen_caps()'s drmGetCap(DRM_CAP_PRIME) fails and
+    * caps->dmabuf stays 0. The DRI frontend then clears
+    * dri_screen::dmabuf_import and every EGL window surface /
+    * AHardwareBuffer (EGL_NATIVE_BUFFER_ANDROID) import fails with a silent
+    * EGL_BAD_PARAMETER. KGSL advertises FD_FEATURE_IMPORT_DMABUF and
+    * implements both directions (kgsl_bo_from_dmabuf / kgsl_bo_dmabuf).
+    */
+   if (fd_get_features(screen->dev) & FD_FEATURE_IMPORT_DMABUF)
+      caps->dmabuf = 0x1 | 0x2; /* DRM_PRIME_CAP_IMPORT | DRM_PRIME_CAP_EXPORT */
+
+   /* this is probably not totally correct.. but it's a start: */
+"""
+if marker in text:
+    print("freedreno_screen.c already patched (kgsl dmabuf caps)", file=sys.stderr)
+elif old in text:
+    path.write_text(text.replace(old, new, 1), encoding="utf-8")
+    print("patched freedreno_screen.c (KGSL dmabuf caps)", file=sys.stderr)
+else:
+    sys.exit("error: cannot patch freedreno_screen.c: unexpected upstream layout")
+PYEOF
+}
+
 build_mesa() {
   local src="${MESA_SRC:-$WORK/mesa}"
   if [[ ! -d "${src}/.git" ]]; then
@@ -584,6 +637,7 @@ build_mesa() {
   patch_mesa_android_stub "${src}"
   patch_mesa_android_kgsl "${src}"
   patch_mesa_android_desktopgl "${src}"
+  patch_mesa_freedreno_kgsl_dmabuf "${src}"
   write_cross_file "${WORK}/android-mesa.ini" "${DRM_PREFIX}/lib/pkgconfig"
   export PKG_CONFIG_LIBDIR="${DRM_PREFIX}/lib/pkgconfig"
   export PKG_CONFIG_PATH="${DRM_PREFIX}/lib/pkgconfig"
