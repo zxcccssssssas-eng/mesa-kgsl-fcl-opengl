@@ -342,6 +342,23 @@ slot is only overwritten once the vendor is done with it.  The design follows
 GameNative's `GPUImage` / `BlitConverter` (AHB -> EGLImage zero-copy +
 native-fence sync); see "Third party" below.
 
+`libGLESv2_mesa.so` in this plugin is a second tiny shim. Mesa's Android build
+links the GL dispatch into libEGL and libGLESv2 separately (glvnd disabled, no
+shared libglapi), so a context made current through libEGL is invisible to the
+entry points exported by libGLESv2. LWJGL resolves GL functions with
+`glXGetProcAddress()` from the loaded GL library first and `dlsym()` second;
+Mesa's libGLESv2 exports neither `glXGetProcAddress` nor the desktop-only entry
+points, so the game ended up with libGLESv2's own stubs and every GL call threw
+`No context is current`. The shim exports `glXGetProcAddress` /
+`glXGetProcAddressARB` / `OSMesaGetProcAddress` forwarding to
+`libEGL_mesa_core.so`'s `eglGetProcAddress()`, so the game's entry points come
+from the same library the EGL shim uses for `eglMakeCurrent` (matching dispatch
+state) and the desktop GL API becomes available.
+
+Validated on the Adreno 840 device: the game reaches the menu and enters a
+world (screenshot non-black), the 60 s JVM SIGSEGV is gone, and the EGL shim's
+AHB ring presents every frame through the vendor GLES.
+
 Build prerequisites (validated on device by `FCLProbe`):
 
 - Mesa must advertise `DRM_PRIME_CAP_IMPORT` for the KGSL screen
