@@ -18,12 +18,16 @@ check() {
 
 check "Android Gradle project exists" test -f "${ROOT}/app/build.gradle.kts"
 check "FCL renderer manifest exists" test -f "${ROOT}/app/src/main/AndroidManifest.xml"
-check "OSMBridge source exists" test -f "${ROOT}/app/src/main/cpp/osmbridge.c"
+check "KGSL env constructor source exists" test -f "${ROOT}/app/src/main/cpp/kgsl_init.c"
 check "Mesa NDK build script exists" test -x "${ROOT}/scripts/build-mesa-android.sh" -o -f "${ROOT}/scripts/build-mesa-android.sh"
 check "libdrm meson flags are probed from meson_options.txt" \
   grep -q 'drm_has_option' "${ROOT}/scripts/build-mesa-android.sh"
+check "Mesa meson flags are probed from meson.options" \
+  grep -q 'mesa_flags' "${ROOT}/scripts/build-mesa-android.sh"
 check "libdrm setup does not hardcode -Dfreedreno=enabled as a meson arg" \
   bash -c "! grep -qE '^[[:space:]]+-Dfreedreno=enabled(\\\\|$)' '${ROOT}/scripts/build-mesa-android.sh'"
+check "Mesa setup does not hardcode -Dosmesa=true" \
+  bash -c "! grep -qE '^[[:space:]]+-Dosmesa=true(\\\\|$)' '${ROOT}/scripts/build-mesa-android.sh'"
 
 manifest="${ROOT}/app/src/main/AndroidManifest.xml"
 gradle="${ROOT}/app/build.gradle.kts"
@@ -35,11 +39,38 @@ check "manifest declares pojavEnv" grep -q 'android:name="pojavEnv"' "${manifest
 check "extractNativeLibs is true" grep -q 'android:extractNativeLibs="true"' "${manifest}"
 
 check "applicationIdSuffix is .freedreno.kgsl" grep -q 'applicationIdSuffix = ".freedreno.kgsl"' "${gradle}"
-check "renderer id is FreedrenoKGSL" grep -q 'FreedrenoKGSL:libOSMBridge.so:libEGL.so' "${gradle}"
+check "renderer id is FreedrenoKGSL EGL/GLES mesa" grep -q 'FreedrenoKGSL:libGLESv2_mesa.so:libEGL_mesa.so' "${gradle}"
 check "GALLIUM_DRIVER=freedreno" grep -q '"GALLIUM_DRIVER" to "freedreno"' "${gradle}"
 check "MESA_LOADER_DRIVER_OVERRIDE=kgsl" grep -q '"MESA_LOADER_DRIVER_OVERRIDE" to "kgsl"' "${gradle}"
-check "POJAV_RENDERER=custom_gallium" grep -q '"POJAV_RENDERER" to "custom_gallium"' "${gradle}"
+check "POJAV_RENDERER=opengles3_desktopgl" grep -q '"POJAV_RENDERER" to "opengles3_desktopgl"' "${gradle}"
 check "legacy JNI packaging enabled" grep -q 'useLegacyPackaging = true' "${gradle}"
+
+# Probe Mesa 26-style meson.options: osmesa must not be emitted.
+mesa_probe_dir="$(mktemp -d)"
+trap 'rm -rf "${mesa_probe_dir}"' EXIT
+cat >"${mesa_probe_dir}/meson.options" <<'EOF'
+option('egl', type : 'feature')
+option('gles2', type : 'feature')
+option('opengl', type : 'boolean', value : true)
+option('platforms', type : 'array', value : ['auto'])
+option('gallium-drivers', type : 'array', value : ['auto'])
+option('freedreno-kmds', type : 'array', value : ['msm'])
+option('vulkan-drivers', type : 'array', value : ['auto'])
+option('egl-lib-suffix', type : 'string', value : '')
+option('gles-lib-suffix', type : 'string', value : '')
+option('android-stub', type : 'boolean', value : false)
+option('glx', type : 'combo', value : 'auto', choices : ['auto', 'disabled', 'dri', 'xlib'])
+option('llvm', type : 'feature')
+EOF
+# shellcheck disable=SC1091
+source "${ROOT}/scripts/build-mesa-android.sh"
+BUILD_VULKAN=1
+probe_flags="$(mesa_flags "${mesa_probe_dir}" | tr '\n' ' ')"
+check "probed flags enable EGL" bash -c "[[ '${probe_flags}' == *'-Degl=enabled'* ]]"
+check "probed flags enable GLES2" bash -c "[[ '${probe_flags}' == *'-Dgles2=enabled'* ]]"
+check "probed flags set freedreno-kmds=kgsl" bash -c "[[ '${probe_flags}' == *'-Dfreedreno-kmds=kgsl'* ]]"
+check "probed flags set egl-lib-suffix=_mesa" bash -c "[[ '${probe_flags}' == *'-Degl-lib-suffix=_mesa'* ]]"
+check "probed flags do not include osmesa" bash -c "[[ '${probe_flags}' != *osmesa* ]]"
 
 # If an APK was passed, inspect it.
 if [[ "${1:-}" != "" ]]; then
@@ -57,8 +88,10 @@ import sys, zipfile
 z = zipfile.ZipFile(sys.argv[1])
 names = z.namelist()
 need = [
-    "lib/arm64-v8a/libOSMBridge.so",
-    "lib/arm64-v8a/libOSMesa.so",
+    "lib/arm64-v8a/libEGL_mesa.so",
+    "lib/arm64-v8a/libGLESv2_mesa.so",
+    "lib/arm64-v8a/libgallium_dri.so",
+    "lib/arm64-v8a/libfreedreno_kgsl_init.so",
 ]
 missing = [n for n in need if n not in names]
 if missing:
@@ -66,7 +99,7 @@ if missing:
     sys.exit(1)
 print("apk native libs ok:", [n for n in names if n.startswith("lib/")])
 PY
-    check "APK contains arm64 OSMBridge + OSMesa" true
+    check "APK contains arm64 EGL_mesa + GLESv2_mesa + gallium_dri" true
   fi
 fi
 

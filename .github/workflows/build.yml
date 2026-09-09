@@ -80,7 +80,7 @@ jobs:
           ccache --max-size=3G
           ccache --zero-stats || true
 
-      - name: Build Mesa (OSMesa + Freedreno KGSL)
+      - name: Build Mesa (EGL/GLES + Freedreno KGSL)
         env:
           BUILD_VULKAN: ${{ github.event.inputs.build_vulkan == 'false' && '0' || '1' }}
         run: |
@@ -160,7 +160,7 @@ jobs:
           fi
           cp "${APK}" "dist/${NAME}"
           echo "APK=${PWD}/dist/${NAME}" >> "$GITHUB_ENV"
-          unzip -l "dist/${NAME}" | grep -E 'lib/arm64-v8a/libOSM(Bridge|esa)\.so'
+          unzip -l "dist/${NAME}" | grep -E 'lib/arm64-v8a/lib(EGL_mesa|GLESv2_mesa|gallium_dri|freedreno_kgsl_init)\.so'
           ./scripts/check-plugin-config.sh "dist/${NAME}"
           ls -lh dist/
 
