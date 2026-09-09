@@ -99,6 +99,30 @@ The build also hard-fails if any packaged DSO still has a `DT_NEEDED` on
 `libcutils`/`libhardware`/`libutils`/`libbinder`/`libgui`, so this regression
 cannot ship again silently.
 
+### `eglInitialize_p() failed: 3001` (fixed in 1.2.4)
+
+After the `libcutils`/`libhardware` fix the libraries load, but Mesa still
+cannot create a display on Qualcomm Android devices:
+
+```text
+E/GLBridge: eglInitialize_p() failed: 3001        (EGL_NOT_INITIALIZED)
+E/GLBridge: eglChooseConfig_p() failed: 3001
+GLFW: Failed to create window context!
+```
+
+Root cause: Mesa 26's **Android EGL platform only probes DRM render nodes**
+(`droid_open_device()` → `_eglDeviceDrm`). Qualcomm Android kernels expose the
+GPU exclusively through KGSL (`/dev/kgsl-3d0`); the only DRM node present is the
+display's `msm_drm` node, which SELinux does not let app processes open. The
+wayland and surfaceless EGL platforms already have a KGSL fallback gated on
+`MESA_LOADER_DRIVER_OVERRIDE=kgsl`, but the Android platform does not.
+
+Fix: `scripts/build-mesa-android.sh` patches
+`src/egl/drivers/dri2/platform_android.c` to add the same fallback — when
+`droid_open_device()` finds nothing and `disp->Options.Kgsl` is set, it opens
+`/dev/kgsl-3d0`, selects the `kgsl` DRI driver and creates the screen, so
+`eglGetDisplay(EGL_DEFAULT_DISPLAY)` + Android window surfaces keep working.
+
 ### Renderer does not appear / old renderer after updating the plugin
 
 FCL scans plugin packages once per process. After installing or updating this

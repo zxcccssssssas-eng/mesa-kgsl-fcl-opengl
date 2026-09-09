@@ -13,6 +13,8 @@
 #   - patches Mesa's android_stub so libcutils/libhardware are linked INTO the
 #     Mesa DSOs instead of left as DT_NEEDED (they are private platform libs
 #     and FCL's JVM classloader namespace cannot resolve them at runtime)
+#   - patches Mesa's Android EGL platform to fall back to /dev/kgsl-3d0
+#     (Qualcomm Android devices have no app-accessible DRM render node)
 #
 # Proven flag sources for this Mesa generation:
 #   - Mesa docs/android.rst (NDK: -Dplatforms=android -Dandroid-stub=true
@@ -459,12 +461,81 @@ verify_no_private_deps() {
   log "no private platform library dependencies in packaged DSOs"
 }
 
+# Mesa 26's Android EGL platform only probes DRM render nodes
+# (droid_open_device -> _eglDeviceDrm). Qualcomm Android kernels expose the
+# GPU exclusively through the KGSL kernel driver (/dev/kgsl-3d0) and the only
+# DRM node (msm_drm display) is not accessible to app processes (SELinux), so
+# eglInitialize() fails with EGL_NOT_INITIALIZED:
+#   E/GLBridge: eglInitialize_p() failed: 3001
+#   E/GLBridge: eglChooseConfig_p() failed: 3001
+# The wayland and surfaceless platforms already have a KGSL fallback gated on
+# MESA_LOADER_DRIVER_OVERRIDE=kgsl (disp->Options.Kgsl); add the same fallback
+# to the Android platform so FCL's EGL window surfaces keep working.
+patch_mesa_android_kgsl() {
+  local src="$1"
+  python3 - "$src" <<'PY'
+import pathlib, sys
+
+src = pathlib.Path(sys.argv[1])
+path = src / "src" / "egl" / "drivers" / "dri2" / "platform_android.c"
+text = path.read_text(encoding="utf-8")
+marker = "Qualcomm Android devices expose the GPU only through the KGSL"
+old = """   if (!force_pure_swrast)
+      device_opened = droid_open_device(disp, disp->Options.ForceSoftware);
+
+   if ((!device_opened && disp->Options.ForceSoftware) ||
+       force_pure_swrast) {"""
+new = """   if (!force_pure_swrast)
+      device_opened = droid_open_device(disp, disp->Options.ForceSoftware);
+
+   /* Qualcomm Android devices expose the GPU only through the KGSL kernel
+    * driver (/dev/kgsl-3d0) and have no DRM render node an app process may
+    * open, so droid_open_device() above fails.  Mirror the wayland and
+    * surfaceless KGSL fallback: use the kgsl KMD directly when
+    * MESA_LOADER_DRIVER_OVERRIDE=kgsl (disp->Options.Kgsl).
+    */
+   if (!device_opened && !disp->Options.ForceSoftware && disp->Options.Kgsl) {
+      dri2_dpy->fd_render_gpu = loader_open_device("/dev/kgsl-3d0");
+      if (dri2_dpy->fd_render_gpu >= 0) {
+         dri2_dpy->fd_display_gpu = dri2_dpy->fd_render_gpu;
+         dri2_dpy->driver_name = strdup("kgsl");
+         dri2_dpy->loader_extensions = droid_image_loader_extensions;
+         dri2_detect_swrast_kopper(disp);
+         if (dri2_create_screen(disp)) {
+            device_opened = EGL_TRUE;
+         } else {
+            _eglLog(_EGL_WARNING, "DRI2: failed to create KGSL screen");
+            free(dri2_dpy->driver_name);
+            dri2_dpy->driver_name = NULL;
+            close(dri2_dpy->fd_render_gpu);
+            dri2_dpy->fd_render_gpu = -1;
+            dri2_dpy->fd_display_gpu = -1;
+         }
+      } else {
+         _eglLog(_EGL_WARNING, "DRI2: failed to open /dev/kgsl-3d0");
+      }
+   }
+
+   if ((!device_opened && disp->Options.ForceSoftware) ||
+       force_pure_swrast) {"""
+
+if marker in text:
+    print("platform_android.c already patched (kgsl fallback)", file=sys.stderr)
+elif old in text:
+    path.write_text(text.replace(old, new, 1), encoding="utf-8")
+    print("patched src/egl/drivers/dri2/platform_android.c (kgsl fallback)", file=sys.stderr)
+else:
+    sys.exit("error: cannot patch platform_android.c: unexpected upstream layout")
+PY
+}
+
 build_mesa() {
   local src="${MESA_SRC:-$WORK/mesa}"
   if [[ ! -d "${src}/.git" ]]; then
     clone_if_needed "${src}" "${MESA_REPO}" "${MESA_REF}"
   fi
   patch_mesa_android_stub "${src}"
+  patch_mesa_android_kgsl "${src}"
   write_cross_file "${WORK}/android-mesa.ini" "${DRM_PREFIX}/lib/pkgconfig"
   export PKG_CONFIG_LIBDIR="${DRM_PREFIX}/lib/pkgconfig"
   export PKG_CONFIG_PATH="${DRM_PREFIX}/lib/pkgconfig"

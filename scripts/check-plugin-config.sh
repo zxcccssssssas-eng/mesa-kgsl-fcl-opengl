@@ -61,6 +61,10 @@ check "build script verifies no private platform deps" \
   grep -q 'verify_no_private_deps' "${ROOT}/scripts/build-mesa-android.sh"
 check "hardware stub returns failure (no NULL deref in u_gralloc)" \
   grep -q 'return -1;' "${ROOT}/scripts/build-mesa-android.sh"
+check "build script patches Mesa Android EGL for KGSL" \
+  grep -q 'patch_mesa_android_kgsl' "${ROOT}/scripts/build-mesa-android.sh"
+check "KGSL fallback opens /dev/kgsl-3d0" \
+  grep -q '/dev/kgsl-3d0' "${ROOT}/scripts/build-mesa-android.sh"
 
 # Probe Mesa 26-style meson.options: osmesa must not be emitted.
 mesa_probe_dir="$(mktemp -d)"
