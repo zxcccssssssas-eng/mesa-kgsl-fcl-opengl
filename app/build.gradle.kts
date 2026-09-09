@@ -12,8 +12,8 @@ android {
         applicationId = "com.mio.plugin.renderer"
         minSdk = 29
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "1.1.0"
         ndk {
             abiFilters += listOf("arm64-v8a")
         }
@@ -42,16 +42,21 @@ android {
             applicationIdSuffix = ".freedreno.kgsl"
 
             // Display name inside FoldCraftLauncher's renderer list.
-            manifestPlaceholders["des"] = "Freedreno KGSL (Mesa Gallium, Adreno)"
+            manifestPlaceholders["des"] = "Freedreno KGSL (Mesa EGL, Adreno)"
 
             // FCL renderer string: Name:libGL.so:libEGL.so
-            // Mesa 26 has no OSMesa. Match FCL's Zink plugin ABI: Mesa EGL
-            // with _mesa suffix + desktop OpenGL via EGL_OPENGL_API
-            // (POJAV_RENDERER=opengles3_desktopgl*).
+            // Mesa 26 dropped OSMesa. Use Mesa Android EGL + GLES libs and
+            // POJAV_RENDERER=opengles3_desktopgl so FCL binds EGL_OPENGL_API
+            // (desktop GL) via the GL bridge — not OSMBridge.
             manifestPlaceholders["renderer"] = "FreedrenoKGSL:libGLESv2_mesa.so:libEGL_mesa.so"
 
             // boatEnv / pojavEnv are KEY=val:KEY2=val2
             // DLOPEN=liba.so,libb.so loads extra native libs from this plugin APK.
+            // Do NOT force MESA_GL_VERSION_OVERRIDE=4.6: NeoForge early display
+            // probes GLFW core profiles and fails when the override lies.
+            // pojavEnv MUST DLOPEN libEGL_mesa.so (was missing in 1.0.0).
+            val dlopenLibs =
+                "libfreedreno_kgsl_init.so,libgallium_dri.so,libEGL_mesa.so,libGLESv2_mesa.so"
             manifestPlaceholders["boatEnv"] = mutableMapOf(
                 "LIBGL_STRING" to "opengles3_desktopgl",
                 "LIBGL_NAME" to "libGLESv2_mesa.so",
@@ -59,10 +64,8 @@ android {
                 "GALLIUM_DRIVER" to "freedreno",
                 "MESA_LOADER_DRIVER_OVERRIDE" to "kgsl",
                 "FD_FORCE_KGSL" to "1",
-                "MESA_GL_VERSION_OVERRIDE" to "4.6",
-                "MESA_GLSL_VERSION_OVERRIDE" to "460",
                 "mesa_glthread" to "true",
-                "DLOPEN" to "libfreedreno_kgsl_init.so,libgallium_dri.so,libEGL_mesa.so,libGLESv2_mesa.so",
+                "DLOPEN" to dlopenLibs,
             ).entries.joinToString(":") { "${it.key}=${it.value}" }
 
             manifestPlaceholders["pojavEnv"] = mutableMapOf(
@@ -71,10 +74,8 @@ android {
                 "GALLIUM_DRIVER" to "freedreno",
                 "MESA_LOADER_DRIVER_OVERRIDE" to "kgsl",
                 "FD_FORCE_KGSL" to "1",
-                "MESA_GL_VERSION_OVERRIDE" to "4.6",
-                "MESA_GLSL_VERSION_OVERRIDE" to "460",
                 "mesa_glthread" to "true",
-                "DLOPEN" to "libfreedreno_kgsl_init.so,libgallium_dri.so,libGLESv2_mesa.so",
+                "DLOPEN" to dlopenLibs,
             ).entries.joinToString(":") { "${it.key}=${it.value}" }
 
             manifestPlaceholders["minMCVer"] = ""

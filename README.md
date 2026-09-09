@@ -28,7 +28,7 @@ FCL finds plugins by scanning installed apps for:
 |---|---|
 | `fclPlugin` | `true` |
 | `renderer` | `FreedrenoKGSL:libGLESv2_mesa.so:libEGL_mesa.so` |
-| `des` | `Freedreno KGSL (Mesa Gallium, Adreno)` |
+| `des` | `Freedreno KGSL (Mesa EGL, Adreno)` |
 | `boatEnv` / `pojavEnv` | KGSL + Mesa EGL env (see below) |
 
 Package id: `com.mio.plugin.renderer.freedreno.kgsl`
@@ -54,20 +54,18 @@ Architecture: **arm64-v8a only**. Mesa 26 Turnip needs Android API **29+** (the 
 
 ## OpenGL version (honest)
 
-Minecraft / F3 may show **OpenGL 4.6** because this plugin sets:
+This plugin **does not** force `MESA_GL_VERSION_OVERRIDE`. Mesa reports whatever Freedreno/KGSL actually exposes on your Adreno. That is safer for NeoForge / GLFW early display, which probes core profiles and fails hard if an override claims 4.6 while context creation cannot deliver it.
 
-```text
-MESA_GL_VERSION_OVERRIDE=4.6
-MESA_GLSL_VERSION_OVERRIDE=460
-```
+If you still want an advertised version for a modpack, set FCL custom env yourself (`MESA_GL_VERSION_OVERRIDE=4.5` etc.). Expect gaps vs desktop GL 4.x on mobile GPUs.
 
-That is the **advertised** desktop GL version Mesa is configured to report. It is **not** a guarantee that every OpenGL 4.6 feature is complete on your Adreno:
+This plugin is **native Gallium Freedreno over KGSL**, not GL4ES / Holy-GL4ES / MobileGlues / LTW. Mesa 26 (lfdevs `adreno-main`) **removed OSMesa**, so the plugin talks to FCL the same way FCL's Mesa EGL path does: `libEGL_mesa.so` + `POJAV_RENDERER=opengles3_desktopgl` (desktop OpenGL via `EGL_OPENGL_API`).
 
-- Freedreno hardware support varies by generation (a6xx vs a7xx vs a8xx).
-- Some 4.x features are missing, lowered, or buggy. Shader packs and Sodium/Iris can expose that.
-- If a version is too new for the GPU, unset the override in FCL custom env, or try `4.5` / `4.4`.
+### NeoForge: "Failed to find a valid GLFW profile"
 
-This plugin is **native Gallium Freedreno over KGSL**, not GL4ES, Holy-GL4ES, MobileGlues, or LTW. Mesa 26 (lfdevs `adreno-main`) **removed OSMesa**, so the plugin talks to FCL the same way FCL's built-in Zink renderer does: Mesa EGL (`libEGL_mesa.so`) with `POJAV_RENDERER=opengles3_desktopgl` so FCL binds `EGL_OPENGL_API` (desktop OpenGL), not the old `custom_gallium` + `libOSMesa.so` path.
+1. Install plugin **1.1.0+** (pojavEnv now DLOPENs `libEGL_mesa.so`; no forced GL 4.6).
+2. In the instance `config/fml.toml`, set `earlyWindowControl=false` (NeoForged guidance for Early Lifecycle / GLFW).
+3. Force-stop FCL, relaunch, pick **Freedreno KGSL** again.
+4. If it still fails, paste the full FCL/latest.log (the earlier message had no log attached).
 
 ## Environment injected into FCL
 
@@ -78,16 +76,14 @@ GALLIUM_DRIVER=freedreno
 MESA_LOADER_DRIVER_OVERRIDE=kgsl
 FD_FORCE_KGSL=1
 LIBGL_ES=3
-MESA_GL_VERSION_OVERRIDE=4.6
-MESA_GLSL_VERSION_OVERRIDE=460
 mesa_glthread=true
 DLOPEN=libfreedreno_kgsl_init.so,libgallium_dri.so,libEGL_mesa.so,libGLESv2_mesa.so
 POJAV_RENDERER=opengles3_desktopgl   # pojav; FCL binds EGL_OPENGL_API
 ```
 
-`libfreedreno_kgsl_init.so` only pins those env vars before Mesa creates a device. The renderer string is `FreedrenoKGSL:libGLESv2_mesa.so:libEGL_mesa.so`. FCL sets `POJAVEXEC_EGL` from the EGL library name (same pattern as built-in Zink's `libEGL_mesa.so`).
+Default path is **pure Gallium Freedreno over KGSL** (not Zink). `libfreedreno_kgsl_init.so` pins KGSL before Mesa creates a device. The renderer string is `FreedrenoKGSL:libGLESv2_mesa.so:libEGL_mesa.so`. FCL sets `POJAVEXEC_EGL` from the EGL library name.
 
-To try **Zink** (OpenGL on Vulkan) instead of native Freedreno, add FCL custom env `GALLIUM_DRIVER=zink` and import a Turnip driver (the AdrenoTools zip from this build, or any FCL driver plugin).
+The Turnip AdrenoTools zip is an optional separate artifact for people who want Vulkan/Zink later; this plugin itself does not switch you to Zink.
 
 ## Build
 
@@ -103,7 +99,7 @@ Dispatch inputs:
 | input | default | meaning |
 |---|---|---|
 | `mesa_ref` | `adreno-main` | [lfdevs/mesa-for-android-container](https://github.com/lfdevs/mesa-for-android-container) branch |
-| `build_mesa` | `true` | NDK Mesa + real `libEGL_mesa.so` |
+| `build_mesa` | `true` | NDK Mesa + real `libEGL_mesa.so` (set `false` to reuse last `mesa-jniLibs` artifact for a fast APK-only rebuild) |
 | `build_vulkan` | `true` | Turnip ICD + AdrenoTools zip |
 
 ### Local

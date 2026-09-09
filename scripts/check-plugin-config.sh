@@ -46,6 +46,8 @@ check "renderer id is FreedrenoKGSL EGL/GLES mesa" grep -q 'FreedrenoKGSL:libGLE
 check "GALLIUM_DRIVER=freedreno" grep -q '"GALLIUM_DRIVER" to "freedreno"' "${gradle}"
 check "MESA_LOADER_DRIVER_OVERRIDE=kgsl" grep -q '"MESA_LOADER_DRIVER_OVERRIDE" to "kgsl"' "${gradle}"
 check "POJAV_RENDERER=opengles3_desktopgl" grep -q '"POJAV_RENDERER" to "opengles3_desktopgl"' "${gradle}"
+check "pojavEnv DLOPEN includes libEGL_mesa.so" grep -q 'libEGL_mesa.so' "${gradle}"
+check "does not force MESA_GL_VERSION_OVERRIDE=4.6" bash -c "! grep -qE '\"MESA_GL_VERSION_OVERRIDE\"[[:space:]]+to[[:space:]]+\"4\.6\"' '${gradle}'"
 check "legacy JNI packaging enabled" grep -q 'useLegacyPackaging = true' "${gradle}"
 
 # Probe Mesa 26-style meson.options: osmesa must not be emitted.
