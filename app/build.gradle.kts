@@ -12,15 +12,17 @@ android {
         applicationId = "com.mio.plugin.renderer"
         minSdk = 29
         targetSdk = 34
-        versionCode = 12
-        versionName = "1.2.9"
+        versionCode = 13
+        versionName = "1.3.0"
         ndk {
             abiFilters += listOf("arm64-v8a")
         }
         externalNativeBuild {
             cmake {
                 // Mesa 26 (lfdevs adreno-main) installs libEGL_mesa.so, not libOSMesa.so.
-                val realEgl = file("src/main/jniLibs/arm64-v8a/libEGL_mesa.so")
+                // scripts/build-mesa-android.sh renames it to libEGL_mesa_core.so
+                // so this shim can take the libEGL_mesa.so slot FCL dlopens.
+                val realEgl = file("src/main/jniLibs/arm64-v8a/libEGL_mesa_core.so")
                 arguments += listOf(
                     "-DANDROID_STL=none",
                     "-DANDROID_PLATFORM=android-29",

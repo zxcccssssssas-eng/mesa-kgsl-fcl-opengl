@@ -727,6 +727,13 @@ package_libs() {
     log "warning: libgallium*.so not found; EGL may fail to load the dri driver"
   fi
 
+  # The plugin ships libEGL_mesa.so as the EGL presentation shim (built by
+  # CMake). Rename the real Mesa EGL so the shim can dlopen it next to itself.
+  if [[ -f "${OUT_JNI}/libEGL_mesa.so" ]]; then
+    mv -f "${OUT_JNI}/libEGL_mesa.so" "${OUT_JNI}/libEGL_mesa_core.so"
+    log "renamed libEGL_mesa.so -> libEGL_mesa_core.so (EGL shim slot)"
+  fi
+
   local turnip=""
   turnip="$(find "${OUT_JNI}" "${MESA_PREFIX}" -name 'libvulkan_freedreno.so' 2>/dev/null | head -n1 || true)"
   if [[ -n "${turnip}" && -f "${turnip}" ]]; then

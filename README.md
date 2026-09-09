@@ -313,6 +313,48 @@ FCL loads `.so` files from a plugin APK’s `nativeLibraryDir` using the **Boat/
 - AdrenoTools zip — `schemaVersion` / `libraryName` as used by K11MCH1 / whitebelyash Turnip packages
 - EGL zero-copy presentation design (AHardwareBuffer -> `eglGetNativeClientBufferANDROID` -> `eglCreateImageKHR` -> fullscreen blit + `EGL_ANDROID_native_fence_sync`) — [utkarshdalal/GameNative](https://github.com/utkarshdalal/GameNative) (`GPUImage` / `BlitConverter`)
 
+## EGL presentation shim
+
+`libEGL_mesa.so` in this plugin is a small presentation shim, not Mesa itself.
+Mesa's real EGL is shipped next to it as `libEGL_mesa_core.so`
+(`scripts/build-mesa-android.sh` renames it while packaging).
+
+Why: the freedreno/KGSL driver cannot own the Android window buffer on this
+device.  The window path goes through `u_gralloc`'s fallback backend (no
+IMapper5), and on the Adreno 840 the game ends up without a usable drawable
+(`eglMakeCurrent` -> `EGL_BAD_SURFACE`, "No context is current") and the JVM
+dies from heap corruption at the 60 s monitor-deflation handshake.  A
+controlled EGL+KGSL pbuffer test renders 100k frames with zero corruption, so
+the shim keeps Mesa off the window entirely:
+
+```text
+game GL -> Mesa context on a pbuffer          (freedreno/kgsl, stable)
+eglSwapBuffers
+  -> glBlitFramebuffer: pbuffer FBO0 -> AHardwareBuffer (R8G8B8A8, linear)
+  -> EGL_KHR_fence_sync + eglDupNativeFenceFDANDROID (GPU hand-off)
+  -> vendor GLES: AHB -> eglGetNativeClientBufferANDROID -> EGLImage ->
+     texture -> glBlitFramebuffer -> vendor window surface
+  -> vendor eglSwapBuffers (vendor gralloc owns the window buffer)
+```
+
+Two AHB slots rotate; the vendor's release fence is exported back to Mesa so a
+slot is only overwritten once the vendor is done with it.  The design follows
+GameNative's `GPUImage` / `BlitConverter` (AHB -> EGLImage zero-copy +
+native-fence sync); see "Third party" below.
+
+Build prerequisites (validated on device by `FCLProbe`):
+
+- Mesa must advertise `DRM_PRIME_CAP_IMPORT` for the KGSL screen
+  (`fd_get_features() & FD_FEATURE_IMPORT_DMABUF`), otherwise
+  `eglCreateImageKHR(EGL_NATIVE_BUFFER_ANDROID)` returns NULL for both the
+  window and the AHB.  Patched in `fd_init_screen_caps()`.
+- The AHB must be imported into Mesa through the platform
+  `ANativeWindowBuffer` returned by the vendor's
+  `eglGetNativeClientBufferANDROID()`, not a hand-built struct: Mesa calls
+  `ANativeWindowBuffer_getHardwareBuffer()`/`AHardwareBuffer_acquire()` on it.
+- The vendor driver accepts the AHB as an `EGLImage`
+  (`EGL_ANDROID_get_native_client_buffer` + `EGL_KHR_image_base`).
+
 ## FCLProbe diagnostic
 
 `libfreedreno_kgsl_init.so` runs a one-shot diagnostic in its constructor

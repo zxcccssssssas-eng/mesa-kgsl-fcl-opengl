@@ -21,4 +21,10 @@ if(FCL_STUB_MESA_EGL)
 
     add_library(gallium_dri SHARED gallium_stub.c)
     target_compile_options(gallium_dri PRIVATE -fvisibility=default -Wall)
+else()
+    # Real Mesa DSOs are in jniLibs (libEGL_mesa_core.so holds the renamed
+    # Mesa EGL). Ship the presentation shim under the name FCL dlopens.
+    add_library(EGL_mesa SHARED egl_shim.c)
+    target_compile_options(EGL_mesa PRIVATE -fvisibility=default -Wall -Wextra)
+    target_link_libraries(EGL_mesa PRIVATE nativewindow log dl)
 endif()

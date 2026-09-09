@@ -70,6 +70,12 @@ check "build script fixes KGSL dma-buf caps" \
   grep -q 'patch_mesa_freedreno_kgsl_dmabuf' "${ROOT}/scripts/build-mesa-android.sh"
 check "KGSL dmabuf patch uses FD_FEATURE_IMPORT_DMABUF" \
   grep -q 'FD_FEATURE_IMPORT_DMABUF' "${ROOT}/scripts/build-mesa-android.sh"
+check "build script renames Mesa EGL for the shim" \
+  grep -q 'libEGL_mesa_core.so' "${ROOT}/scripts/build-mesa-android.sh"
+check "EGL shim source present" \
+  test -f "${ROOT}/app/src/main/cpp/egl_shim.c"
+check "EGL shim built as libEGL_mesa.so" \
+  grep -q 'add_library(EGL_mesa SHARED egl_shim.c)' "${ROOT}/app/src/main/cpp/CMakeLists.txt"
 check "build script enables EGL_OPENGL_API on Android" \
   grep -q 'patch_mesa_android_desktopgl' "${ROOT}/scripts/build-mesa-android.sh"
 check "desktop GL patch touches _eglIsApiValid" \
