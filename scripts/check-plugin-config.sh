@@ -75,7 +75,7 @@ check "build script renames Mesa EGL for the shim" \
 check "EGL shim source present" \
   test -f "${ROOT}/app/src/main/cpp/egl_shim.c"
 check "EGL shim built as libEGL_mesa.so" \
-  grep -q 'add_library(EGL_mesa SHARED egl_shim.c)' "${ROOT}/app/src/main/cpp/CMakeLists.txt"
+  grep -q 'add_library(EGL_mesa SHARED egl_shim.c vulkan_present.c)' "${ROOT}/app/src/main/cpp/CMakeLists.txt"
 check "GLES entry-point shim source present" \
   test -f "${ROOT}/app/src/main/cpp/gles_shim.c"
 check "GLES shim exports glXGetProcAddress" \

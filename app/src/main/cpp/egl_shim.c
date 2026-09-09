@@ -22,6 +22,8 @@
  */
 #define LOG_TAG "EGLShim"
 
+#include "vulkan_present.h"
+#include <poll.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,7 +45,7 @@
 #define EGL_SYNC_NATIVE_FENCE_ANDROID 0x3144
 #endif
 #ifndef EGL_SYNC_NATIVE_FENCE_FD_ANDROID
-#define EGL_SYNC_NATIVE_FENCE_FD_ANDROID 0x3143
+#define EGL_SYNC_NATIVE_FENCE_FD_ANDROID 0x3145
 #endif
 #ifndef EGL_SYNC_FENCE_KHR
 #define EGL_SYNC_FENCE_KHR 0x30F9
@@ -92,6 +94,15 @@ struct egl_api {
 };
 
 struct gl_api {
+    void (*GetIntegerv)(GLenum, GLint *);
+    GLboolean (*IsEnabled)(GLenum);
+    void (*Enable)(GLenum);
+    void (*Disable)(GLenum);
+    GLenum (*CheckFramebufferStatus)(GLenum);
+    void (*ReadPixels)(GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, void *);
+    void (*PixelStorei)(GLenum, GLint);
+    void (*BindBuffer)(GLenum, GLuint);
+    void (*ReadBuffer)(GLenum);
     void (*GenTextures)(GLsizei, GLuint *);
     void (*DeleteTextures)(GLsizei, const GLuint *);
     void (*BindTexture)(GLenum, GLuint);
@@ -168,6 +179,15 @@ static void load_gl_api(struct gl_api *gl, struct egl_api *egl, const char *what
         gl->field = (void *)egl->GetProcAddress(name); \
         if (!gl->field) SHIM_ERR("%s: missing GL %s", what, name); \
     } while (0)
+    LOAD_GL(GetIntegerv, "glGetIntegerv");
+    LOAD_GL(IsEnabled, "glIsEnabled");
+    LOAD_GL(Enable, "glEnable");
+    LOAD_GL(Disable, "glDisable");
+    LOAD_GL(CheckFramebufferStatus, "glCheckFramebufferStatus");
+    LOAD_GL(ReadPixels, "glReadPixels");
+    LOAD_GL(PixelStorei, "glPixelStorei");
+    LOAD_GL(BindBuffer, "glBindBuffer");
+    LOAD_GL(ReadBuffer, "glReadBuffer");
     LOAD_GL(GenTextures, "glGenTextures");
     LOAD_GL(DeleteTextures, "glDeleteTextures");
     LOAD_GL(BindTexture, "glBindTexture");
@@ -219,10 +239,14 @@ struct shim_ring_slot {
 struct shim_surface {
     struct shim_display *dpy;
     int is_window;
+    struct vk_present *vk;
+    uint8_t *pixels;
     EGLConfig mesa_config;
     EGLSurface mesa_surface;
     EGLSurface vendor_window;
     int width, height;
+    struct shim_surface *next;
+    struct shim_context *ring_ctx;
     int ring_ready;
     struct shim_ring_slot ring[RING_SIZE];
     int cur;
@@ -235,6 +259,7 @@ struct shim_display {
     EGLConfig vendor_cfg;
     EGLContext vendor_ctx;
     EGLSurface vendor_scratch; /* 1x1 pbuffer, keeps vendor ctx creatable */
+    struct shim_surface *surfaces;
     int failed;
 };
 
@@ -246,13 +271,47 @@ static __thread struct shim_context *tls_ctx;
 static __thread struct shim_surface *tls_draw;
 static __thread struct shim_surface *tls_read;
 
-static EGLint shim_error = EGL_SUCCESS;
-static EGLenum shim_api = EGL_OPENGL_ES_API;
+static __thread EGLint shim_error = EGL_SUCCESS;
+static __thread EGLenum shim_api = EGL_OPENGL_ES_API;
 
 static EGLint set_error(EGLint err)
 {
     shim_error = err;
     return err;
+}
+
+#ifndef GL_FRAMEBUFFER_SRGB
+#define GL_FRAMEBUFFER_SRGB 0x8DB9
+#endif
+struct saved_gl { GLint read, draw, tex; GLboolean scissor, srgb; };
+static struct saved_gl save_gl(void)
+{
+    struct saved_gl st;
+    mesa_gl.GetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &st.read);
+    mesa_gl.GetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &st.draw);
+    mesa_gl.GetIntegerv(GL_TEXTURE_BINDING_2D, &st.tex);
+    st.scissor = mesa_gl.IsEnabled(GL_SCISSOR_TEST);
+    st.srgb = shim_api == EGL_OPENGL_API ? mesa_gl.IsEnabled(GL_FRAMEBUFFER_SRGB) : GL_FALSE;
+    mesa_gl.Disable(GL_SCISSOR_TEST);
+    if (shim_api == EGL_OPENGL_API) mesa_gl.Disable(GL_FRAMEBUFFER_SRGB);
+    return st;
+}
+static void restore_gl(struct saved_gl st)
+{
+    mesa_gl.BindFramebuffer(GL_READ_FRAMEBUFFER, st.read);
+    mesa_gl.BindFramebuffer(GL_DRAW_FRAMEBUFFER, st.draw);
+    mesa_gl.BindTexture(GL_TEXTURE_2D, st.tex);
+    if (st.scissor) mesa_gl.Enable(GL_SCISSOR_TEST);
+    if (st.srgb) mesa_gl.Enable(GL_FRAMEBUFFER_SRGB);
+}
+static int restore_mesa(struct shim_display *d)
+{
+    if (d->vendor_ok)
+        vendor_egl.MakeCurrent(d->vendor_dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    return mesa_egl.MakeCurrent(d->mesa_dpy,
+        tls_draw ? tls_draw->mesa_surface : EGL_NO_SURFACE,
+        tls_read ? tls_read->mesa_surface : EGL_NO_SURFACE,
+        tls_ctx ? tls_ctx->mesa_ctx : EGL_NO_CONTEXT);
 }
 
 /* ------------------------------------------------------------------ */
@@ -306,6 +365,9 @@ static int vendor_init(struct shim_display *d)
 static void ring_slot_destroy(struct shim_display *d, struct shim_ring_slot *slot)
 {
     if (slot->vendor_fence_fd >= 0) {
+        /* Finish outstanding reads before releasing imported storage. */
+        struct pollfd pfd = { .fd = slot->vendor_fence_fd, .events = POLLIN };
+        while (poll(&pfd, 1, -1) < 0 && errno == EINTR) {}
         close(slot->vendor_fence_fd);
         slot->vendor_fence_fd = -1;
     }
@@ -315,10 +377,14 @@ static void ring_slot_destroy(struct shim_display *d, struct shim_ring_slot *slo
         mesa_gl.DeleteTextures(1, &slot->mesa_tex);
     if (slot->mesa_image && mesa_egl.DestroyImageKHR)
         mesa_egl.DestroyImageKHR(d->mesa_dpy, slot->mesa_image);
-    if (slot->vendor_fbo && vendor_gl.DeleteFramebuffers)
-        vendor_gl.DeleteFramebuffers(1, &slot->vendor_fbo);
-    if (slot->vendor_tex && vendor_gl.DeleteTextures)
-        vendor_gl.DeleteTextures(1, &slot->vendor_tex);
+    if (slot->vendor_tex || slot->vendor_fbo) {
+        if (vendor_egl.MakeCurrent(d->vendor_dpy, d->vendor_scratch, d->vendor_scratch, d->vendor_ctx)) {
+            vendor_gl.Finish();
+            if (slot->vendor_fbo) vendor_gl.DeleteFramebuffers(1, &slot->vendor_fbo);
+            if (slot->vendor_tex) vendor_gl.DeleteTextures(1, &slot->vendor_tex);
+        }
+        restore_mesa(d);
+    }
     if (slot->vendor_image && vendor_egl.DestroyImageKHR)
         vendor_egl.DestroyImageKHR(d->vendor_dpy, slot->vendor_image);
     if (slot->ahb)
@@ -329,10 +395,19 @@ static void ring_slot_destroy(struct shim_display *d, struct shim_ring_slot *slo
 
 static void ring_destroy(struct shim_surface *s)
 {
-    if (!s->ring_ready)
-        return;
-    for (int i = 0; i < RING_SIZE; i++)
+    for (int i = 0; i < RING_SIZE; i++) {
+        if (s->ring_ctx) {
+            if (!mesa_egl.MakeCurrent(s->dpy->mesa_dpy, s->mesa_surface, s->mesa_surface,
+                                     s->ring_ctx->mesa_ctx)) {
+                SHIM_ERR("cannot bind ring owner for cleanup");
+                return;
+            }
+            mesa_gl.Finish();
+        }
         ring_slot_destroy(s->dpy, &s->ring[i]);
+    }
+    if (s->ring_ctx) restore_mesa(s->dpy);
+    s->ring_ctx = NULL;
     s->ring_ready = 0;
 }
 
@@ -341,15 +416,18 @@ static void ring_destroy(struct shim_surface *s)
 static int ring_create(struct shim_surface *s)
 {
     struct shim_display *d = s->dpy;
-    if (s->ring_ready)
-        return 1;
-    if (!mesa_gl.GenTextures) {
-        SHIM_ERR("ring: Mesa GL entry points missing");
+    if (s->ring_ready && s->ring_ctx == tls_ctx) return 1;
+    if (s->ring_ctx) ring_destroy(s);
+    s->ring_ctx = tls_ctx;
+    if (!mesa_gl.GenTextures || !mesa_gl.EGLImageTargetTexture2DOES ||
+        !mesa_egl.CreateImageKHR || !vendor_egl.CreateImageKHR ||
+        !vendor_egl.GetNativeClientBufferANDROID) {
+        SHIM_ERR("ring: required AHB import entry points missing");
         return 0;
     }
     if (!vendor_gl.GenTextures && d->vendor_ok)
         load_gl_api(&vendor_gl, &vendor_egl, "vendor");
-    if (!vendor_gl.GenTextures) {
+    if (!vendor_gl.GenTextures || !vendor_gl.EGLImageTargetTexture2DOES) {
         SHIM_ERR("ring: vendor GL entry points missing");
         return 0;
     }
@@ -398,8 +476,9 @@ static int ring_create(struct shim_surface *s)
         mesa_gl.BindFramebuffer(GL_FRAMEBUFFER, slot->mesa_fbo);
         mesa_gl.FramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
                                      GL_TEXTURE_2D, slot->mesa_tex, 0);
-        mesa_gl.BindFramebuffer(GL_FRAMEBUFFER, 0);
-
+        if (mesa_gl.CheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+            SHIM_ERR("ring: incomplete Mesa framebuffer"); goto fail;
+        }
         /* Vendor side: texture sampled by the presentation blit. */
         if (!vendor_current) {
             if (!vendor_egl.MakeCurrent(d->vendor_dpy, d->vendor_scratch, d->vendor_scratch,
@@ -424,19 +503,23 @@ static int ring_create(struct shim_surface *s)
         vendor_gl.BindFramebuffer(GL_FRAMEBUFFER, slot->vendor_fbo);
         vendor_gl.FramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
                                        GL_TEXTURE_2D, slot->vendor_tex, 0);
-        vendor_gl.BindFramebuffer(GL_FRAMEBUFFER, 0);
+        if (vendor_gl.CheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+            SHIM_ERR("ring: incomplete vendor framebuffer"); goto fail;
+        }
+        if (!restore_mesa(d)) goto fail;
+        vendor_current = 0;
     }
 
     /* restore Mesa as current (caller had it current) */
     if (vendor_current && tls_ctx)
-        mesa_egl.MakeCurrent(d->mesa_dpy, s->mesa_surface, s->mesa_surface, tls_ctx->mesa_ctx);
+        restore_mesa(d);
     s->ring_ready = 1;
     SHIM_LOG("AHB ring ready: %dx%d", s->width, s->height);
     return 1;
 
 fail:
     if (vendor_current && tls_ctx)
-        mesa_egl.MakeCurrent(d->mesa_dpy, s->mesa_surface, s->mesa_surface, tls_ctx->mesa_ctx);
+        restore_mesa(d);
     ring_destroy(s);
     return 0;
 }
@@ -447,33 +530,69 @@ fail:
 
 static int fence_wait(struct egl_api *api, EGLDisplay dpy, int fd)
 {
-    if (fd < 0)
-        return 1;
-    const EGLint attribs[] = { EGL_SYNC_NATIVE_FENCE_FD_ANDROID, fd, EGL_NONE };
-    EGLSyncKHR sync = api->CreateSyncKHR(dpy, EGL_SYNC_NATIVE_FENCE_ANDROID, attribs);
-    if (sync == EGL_NO_SYNC_KHR) {
-        SHIM_ERR("eglCreateSyncKHR(native fence fd=%d) failed: 0x%x", fd, api->GetError());
-        close(fd);
-        return 0;
+    (void)api; (void)dpy;
+    if (fd < 0) return 1;
+    struct pollfd pfd = { .fd = fd, .events = POLLIN };
+    int result;
+    do { result = poll(&pfd, 1, -1); } while (result < 0 && errno == EINTR);
+    close(fd);
+    return result > 0 && (pfd.revents & POLLIN) && !(pfd.revents & (POLLERR | POLLNVAL));
+}
+static int fence_export(struct egl_api *api, struct gl_api *gl, EGLDisplay dpy)
+{
+    int fd = -1;
+    if (api->CreateSyncKHR && api->DestroySyncKHR && api->DupNativeFenceFDANDROID) {
+        EGLSyncKHR sync = api->CreateSyncKHR(dpy, EGL_SYNC_NATIVE_FENCE_ANDROID, NULL);
+        if (sync != EGL_NO_SYNC_KHR) {
+            gl->Flush(); /* Submit the fence before exporting it. */
+            fd = api->DupNativeFenceFDANDROID(dpy, sync);
+            api->DestroySyncKHR(dpy, sync);
+        }
     }
-    if (api->WaitSyncKHR)
-        api->WaitSyncKHR(dpy, sync, 0);
-    else if (api->ClientWaitSyncKHR)
-        api->ClientWaitSyncKHR(dpy, sync, EGL_SYNC_FLUSH_COMMANDS_BIT_KHR, EGL_FOREVER_KHR);
-    api->DestroySyncKHR(dpy, sync); /* consumes the fd */
-    return 1;
+    if (fd < 0) {
+        if (api->GetError) api->GetError(); /* Do not expose an internal fallback error. */
+        gl->Finish(); /* Completion of the blit, not just preceding draws. */
+    }
+    return fd;
 }
 
-static int fence_export(struct egl_api *api, EGLDisplay dpy)
+static int vulkan_present(struct shim_surface *s)
 {
-    if (!api->CreateSyncKHR || !api->DupNativeFenceFDANDROID)
-        return -1;
-    EGLSyncKHR sync = api->CreateSyncKHR(dpy, EGL_SYNC_FENCE_KHR, NULL);
-    if (sync == EGL_NO_SYNC_KHR)
-        return -1;
-    int fd = api->DupNativeFenceFDANDROID(dpy, sync);
-    api->DestroySyncKHR(dpy, sync);
-    return fd;
+    size_t row = (size_t)s->width * 4;
+    if ((size_t)s->height > SIZE_MAX / row) return 0;
+    if (!s->pixels) s->pixels = malloc(row * s->height);
+    if (!s->pixels) return 0;
+    struct saved_gl st = save_gl();
+    GLint pack, align, length, rows, skip, read;
+    mesa_gl.GetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &pack);
+    mesa_gl.GetIntegerv(GL_PACK_ALIGNMENT, &align);
+    mesa_gl.GetIntegerv(GL_PACK_ROW_LENGTH, &length);
+    mesa_gl.GetIntegerv(GL_PACK_SKIP_ROWS, &rows);
+    mesa_gl.GetIntegerv(GL_PACK_SKIP_PIXELS, &skip);
+    mesa_gl.BindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+    mesa_gl.GetIntegerv(GL_READ_BUFFER, &read);
+    GLint doublebuffer = 1;
+    if (shim_api == EGL_OPENGL_API) mesa_gl.GetIntegerv(0x0C32 /* GL_DOUBLEBUFFER */, &doublebuffer);
+    mesa_gl.ReadBuffer(doublebuffer ? GL_BACK : GL_FRONT);
+    mesa_gl.BindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    mesa_gl.PixelStorei(GL_PACK_ALIGNMENT, 1);
+    mesa_gl.PixelStorei(GL_PACK_ROW_LENGTH, 0);
+    mesa_gl.PixelStorei(GL_PACK_SKIP_ROWS, 0);
+    mesa_gl.PixelStorei(GL_PACK_SKIP_PIXELS, 0);
+    mesa_gl.ReadPixels(0, 0, s->width, s->height, GL_RGBA, GL_UNSIGNED_BYTE, s->pixels);
+    mesa_gl.ReadBuffer(read);
+    mesa_gl.BindBuffer(GL_PIXEL_PACK_BUFFER, pack);
+    mesa_gl.PixelStorei(GL_PACK_ALIGNMENT, align);
+    mesa_gl.PixelStorei(GL_PACK_ROW_LENGTH, length);
+    mesa_gl.PixelStorei(GL_PACK_SKIP_ROWS, rows);
+    mesa_gl.PixelStorei(GL_PACK_SKIP_PIXELS, skip);
+    restore_gl(st);
+    /* GL starts at the bottom; Vulkan buffer-to-image copies start at the top. */
+    for (int y = 0; y < s->height / 2; ++y) {
+        uint8_t *a = s->pixels + y * row, *b = s->pixels + (s->height - 1 - y) * row;
+        for (size_t x = 0; x < row; ++x) { uint8_t t = a[x]; a[x] = b[x]; b[x] = t; }
+    }
+    return vk_present_frame(s->vk, s->pixels, s->width, s->height);
 }
 
 static int shim_present(struct shim_surface *s, struct shim_context *ctx)
@@ -484,55 +603,64 @@ static int shim_present(struct shim_surface *s, struct shim_context *ctx)
         SHIM_ERR("eglSwapBuffers without a current context");
         return 0;
     }
-    if (!d->vendor_ok && !vendor_init(d))
+    if (!s->vk && !d->vendor_ok && !vendor_init(d))
         return 0;
     mesa_egl.BindAPI(shim_api);
 
     /* Track window size changes (FCL recreates the surface, but be safe). */
     EGLint w = 0, h = 0;
-    vendor_egl.QuerySurface(d->vendor_dpy, s->vendor_window, EGL_WIDTH, &w);
-    vendor_egl.QuerySurface(d->vendor_dpy, s->vendor_window, EGL_HEIGHT, &h);
+    if (s->vk) {
+        if (!vk_present_size(s->vk, &w, &h)) return 0;
+    } else {
+        vendor_egl.QuerySurface(d->vendor_dpy, s->vendor_window, EGL_WIDTH, &w);
+        vendor_egl.QuerySurface(d->vendor_dpy, s->vendor_window, EGL_HEIGHT, &h);
+    }
     if (w > 0 && h > 0 && (w != s->width || h != s->height)) {
         SHIM_LOG("window resized %dx%d -> %dx%d", s->width, s->height, w, h);
-        ring_destroy(s);
-        if (s->mesa_surface != EGL_NO_SURFACE)
-            mesa_egl.DestroySurface(d->mesa_dpy, s->mesa_surface);
-        s->width = w;
-        s->height = h;
         const EGLint pb[] = { EGL_WIDTH, w, EGL_HEIGHT, h, EGL_NONE };
-        mesa_egl.BindAPI(shim_api);
-        s->mesa_surface = mesa_egl.CreatePbufferSurface(d->mesa_dpy, s->mesa_config, pb);
-        if (s->mesa_surface == EGL_NO_SURFACE) {
-            SHIM_ERR("resize: Mesa pbuffer recreate failed: 0x%x", mesa_egl.GetError());
+        EGLSurface next = mesa_egl.CreatePbufferSurface(d->mesa_dpy, s->mesa_config, pb);
+        if (next == EGL_NO_SURFACE) return 0;
+        EGLSurface old = s->mesa_surface;
+        s->mesa_surface = next;
+        if (!restore_mesa(d)) {
+            s->mesa_surface = old;
+            mesa_egl.DestroySurface(d->mesa_dpy, next);
             return 0;
         }
-        if (ctx && !mesa_egl.MakeCurrent(d->mesa_dpy, s->mesa_surface, s->mesa_surface,
-                                         ctx->mesa_ctx)) {
-            SHIM_ERR("resize: Mesa eglMakeCurrent failed: 0x%x", mesa_egl.GetError());
-            return 0;
-        }
+        ring_destroy(s);
+        mesa_egl.DestroySurface(d->mesa_dpy, old);
+        free(s->pixels); s->pixels = NULL;
+        s->width = w; s->height = h;
+        return 1; /* New pbuffer has no rendered content until the next frame. */
     }
+    if (s->vk) return vulkan_present(s);
+    struct saved_gl saved = save_gl();
 
-    if (!ring_create(s))
-        return 0;
+    if (!ring_create(s)) { restore_gl(saved); return 0; }
 
     struct shim_ring_slot *slot = &s->ring[s->cur];
 
     /* Wait until the vendor is done with this slot before overwriting it. */
     if (slot->vendor_fence_fd >= 0) {
-        fence_wait(&mesa_egl, d->mesa_dpy, slot->vendor_fence_fd);
+        int ok = fence_wait(&mesa_egl, d->mesa_dpy, slot->vendor_fence_fd);
         slot->vendor_fence_fd = -1;
+        if (!ok) { restore_gl(saved); return 0; }
     }
 
     /* Mesa: pbuffer FBO 0 -> AHB FBO. */
-    mesa_gl.Finish();
     mesa_gl.BindFramebuffer(GL_READ_FRAMEBUFFER, 0);
     mesa_gl.BindFramebuffer(GL_DRAW_FRAMEBUFFER, slot->mesa_fbo);
+    GLint read_buffer, doublebuffer = 1;
+    mesa_gl.GetIntegerv(GL_READ_BUFFER, &read_buffer);
+    if (shim_api == EGL_OPENGL_API) mesa_gl.GetIntegerv(0x0C32 /* GL_DOUBLEBUFFER */, &doublebuffer);
+    mesa_gl.ReadBuffer(doublebuffer ? GL_BACK : GL_FRONT);
     mesa_gl.BlitFramebuffer(0, 0, s->width, s->height, 0, 0, s->width, s->height,
                             GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    mesa_gl.ReadBuffer(read_buffer);
     mesa_gl.BindFramebuffer(GL_FRAMEBUFFER, 0);
     mesa_gl.Flush();
-    int fence_fd = fence_export(&mesa_egl, d->mesa_dpy);
+    int fence_fd = fence_export(&mesa_egl, &mesa_gl, d->mesa_dpy);
+    restore_gl(saved);
 
     /* Vendor: wait for Mesa, blit AHB -> window, swap. */
     if (!vendor_egl.MakeCurrent(d->vendor_dpy, s->vendor_window, s->vendor_window,
@@ -540,12 +668,12 @@ static int shim_present(struct shim_surface *s, struct shim_context *ctx)
         SHIM_ERR("vendor eglMakeCurrent(window) failed: 0x%x", vendor_egl.GetError());
         if (fence_fd >= 0)
             close(fence_fd);
-        if (ctx)
-            mesa_egl.MakeCurrent(d->mesa_dpy, s->mesa_surface, s->mesa_surface, ctx->mesa_ctx);
+        restore_mesa(d);
         return 0;
     }
-    if (fence_fd >= 0)
-        fence_wait(&vendor_egl, d->vendor_dpy, fence_fd);
+    if (!fence_wait(&vendor_egl, d->vendor_dpy, fence_fd)) {
+        restore_mesa(d); return 0;
+    }
 
     vendor_gl.BindFramebuffer(GL_READ_FRAMEBUFFER, slot->vendor_fbo);
     vendor_gl.BindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
@@ -553,14 +681,14 @@ static int shim_present(struct shim_surface *s, struct shim_context *ctx)
                               GL_COLOR_BUFFER_BIT, GL_NEAREST);
     vendor_gl.Flush();
 
-    slot->vendor_fence_fd = fence_export(&vendor_egl, d->vendor_dpy);
+    slot->vendor_fence_fd = fence_export(&vendor_egl, &vendor_gl, d->vendor_dpy);
 
     EGLBoolean swapped = vendor_egl.SwapBuffers(d->vendor_dpy, s->vendor_window);
 
     /* Restore the game's Mesa context. */
-    if (ctx && !mesa_egl.MakeCurrent(d->mesa_dpy, s->mesa_surface, s->mesa_surface,
-                                     ctx->mesa_ctx)) {
+    if (!restore_mesa(d)) {
         SHIM_ERR("restore Mesa eglMakeCurrent failed: 0x%x", mesa_egl.GetError());
+        return 0;
     }
 
     s->cur ^= 1;
@@ -579,6 +707,7 @@ static int shim_present(struct shim_surface *s, struct shim_context *ctx)
 EGLDisplay eglGetDisplay(EGLNativeDisplayType display_id)
 {
     struct shim_display *d = &display_singleton;
+    if (!mesa_egl.GetDisplay) { set_error(EGL_NOT_INITIALIZED); return EGL_NO_DISPLAY; }
     if (!display_used) {
         d->mesa_dpy = mesa_egl.GetDisplay(display_id);
         if (d->mesa_dpy == EGL_NO_DISPLAY) {
@@ -684,6 +813,8 @@ EGLBoolean eglDestroyContext(EGLDisplay dpy, EGLContext ctx)
     struct shim_context *c = (struct shim_context *)ctx;
     if (!d || !c)
         return EGL_FALSE;
+    for (struct shim_surface *s = d->surfaces; s; s = s->next)
+        if (s->ring_ctx == c) ring_destroy(s);
     EGLBoolean ok = mesa_egl.DestroyContext(d->mesa_dpy, c->mesa_ctx);
     free(c);
     return ok;
@@ -697,21 +828,31 @@ EGLSurface eglCreateWindowSurface(EGLDisplay dpy, EGLConfig config,
         set_error(EGL_BAD_NATIVE_WINDOW);
         return EGL_NO_SURFACE;
     }
-    if (!d->vendor_ok && !vendor_init(d)) {
+    const char *backend = getenv("FCL_SHIM_RENDERER");
+    struct vk_present *vk = NULL;
+    if (backend && !strcmp(backend, "vulkan")) {
+        vk = vk_present_create(win);
+        if (!vk) SHIM_ERR("Vulkan initialization failed; falling back to EGL");
+    } else if (backend && strcmp(backend, "egl")) {
+        SHIM_ERR("unknown FCL_SHIM_RENDERER=%s; using EGL", backend);
+    }
+    if (!vk && !d->vendor_ok && !vendor_init(d)) {
         set_error(EGL_NOT_INITIALIZED);
         return EGL_NO_SURFACE;
     }
-
-    EGLSurface vwin = vendor_egl.CreateWindowSurface(d->vendor_dpy, d->vendor_cfg, win,
-                                                     attrib_list);
-    if (vwin == EGL_NO_SURFACE) {
+    EGLSurface vwin = vk ? EGL_NO_SURFACE : vendor_egl.CreateWindowSurface(
+        d->vendor_dpy, d->vendor_cfg, win, attrib_list);
+    if (!vk && vwin == EGL_NO_SURFACE) {
         SHIM_ERR("vendor eglCreateWindowSurface failed: 0x%x", vendor_egl.GetError());
         set_error(EGL_BAD_NATIVE_WINDOW);
         return EGL_NO_SURFACE;
     }
     EGLint w = 0, h = 0;
-    vendor_egl.QuerySurface(d->vendor_dpy, vwin, EGL_WIDTH, &w);
-    vendor_egl.QuerySurface(d->vendor_dpy, vwin, EGL_HEIGHT, &h);
+    if (vk) vk_present_size(vk, &w, &h);
+    else {
+        vendor_egl.QuerySurface(d->vendor_dpy, vwin, EGL_WIDTH, &w);
+        vendor_egl.QuerySurface(d->vendor_dpy, vwin, EGL_HEIGHT, &h);
+    }
     if (w <= 0 || h <= 0) {
         w = 16;
         h = 16;
@@ -724,14 +865,19 @@ EGLSurface eglCreateWindowSurface(EGLDisplay dpy, EGLConfig config,
     if (mpb == EGL_NO_SURFACE) {
         SHIM_ERR("Mesa eglCreatePbufferSurface(%dx%d) failed: 0x%x", w, h,
                  mesa_egl.GetError());
-        vendor_egl.DestroySurface(d->vendor_dpy, vwin);
+        if (vk) vk_present_destroy(vk);
+        else vendor_egl.DestroySurface(d->vendor_dpy, vwin);
         set_error(EGL_BAD_MATCH);
         return EGL_NO_SURFACE;
     }
 
     struct shim_surface *s = calloc(1, sizeof(*s));
     s->dpy = d;
+    s->next = d->surfaces;
+    d->surfaces = s;
     s->is_window = 1;
+    s->vk = vk;
+    SHIM_LOG("presentation backend: %s", vk ? "vulkan (CPU upload)" : "egl (AHB)");
     s->mesa_config = config;
     s->mesa_surface = mpb;
     s->vendor_window = vwin;
@@ -773,6 +919,11 @@ EGLBoolean eglDestroySurface(EGLDisplay dpy, EGLSurface surface)
     if (!d || !s)
         return EGL_FALSE;
     ring_destroy(s);
+    struct shim_surface **link = &d->surfaces;
+    while (*link && *link != s) link = &(*link)->next;
+    if (*link) *link = s->next;
+    vk_present_destroy(s->vk);
+    free(s->pixels);
     if (s->is_window && s->vendor_window != EGL_NO_SURFACE)
         vendor_egl.DestroySurface(d->vendor_dpy, s->vendor_window);
     if (s->mesa_surface != EGL_NO_SURFACE)
@@ -849,8 +1000,14 @@ EGLBoolean eglSwapInterval(EGLDisplay dpy, EGLint interval)
     struct shim_display *d = (struct shim_display *)dpy;
     if (!d)
         return EGL_FALSE;
-    if (tls_draw && tls_draw->is_window)
-        return vendor_egl.SwapInterval(d->vendor_dpy, interval);
+    if (tls_draw && tls_draw->vk) return EGL_TRUE; /* Vulkan uses FIFO. */
+    if (tls_draw && tls_draw->is_window) {
+        if (!vendor_egl.MakeCurrent(d->vendor_dpy, tls_draw->vendor_window,
+                                   tls_draw->vendor_window, d->vendor_ctx)) return EGL_FALSE;
+        EGLBoolean ok = vendor_egl.SwapInterval(d->vendor_dpy, interval);
+        if (!restore_mesa(d)) return EGL_FALSE;
+        return ok;
+    }
     return EGL_TRUE;
 }
 
@@ -863,6 +1020,12 @@ EGLBoolean eglQuerySurface(EGLDisplay dpy, EGLSurface surface, EGLint attribute,
         return EGL_FALSE;
     }
     if (s->is_window && (attribute == EGL_WIDTH || attribute == EGL_HEIGHT)) {
+        if (s->vk) {
+            int w, h;
+            if (!vk_present_size(s->vk, &w, &h)) return EGL_FALSE;
+            *value = attribute == EGL_WIDTH ? w : h;
+            return EGL_TRUE;
+        }
         return vendor_egl.QuerySurface(d->vendor_dpy, s->vendor_window, attribute, value);
     }
     return mesa_egl.QuerySurface(d->mesa_dpy, s->mesa_surface, attribute, value);
@@ -885,8 +1048,9 @@ EGLDisplay eglGetCurrentDisplay(void)
 
 EGLBoolean eglBindAPI(EGLenum api)
 {
-    shim_api = api;
-    return mesa_egl.BindAPI(api);
+    EGLBoolean ok = mesa_egl.BindAPI(api);
+    if (ok) shim_api = api;
+    return ok;
 }
 
 EGLBoolean eglReleaseThread(void)
@@ -979,7 +1143,9 @@ __eglMustCastToProperFunctionPointerType eglGetProcAddress(const char *procname)
 /* init                                                               */
 /* ------------------------------------------------------------------ */
 
+#ifndef FCL_SHIM_TEST
 __attribute__((constructor))
+#endif
 static void shim_init(void)
 {
     char path[4096];
@@ -987,8 +1153,7 @@ static void shim_init(void)
 
     snprintf(path, sizeof(path), "%s/libEGL_mesa_core.so", dir);
     if (!load_egl_api(&mesa_egl, path, NULL)) {
-        /* Fall back to a plain name lookup (e.g. system Mesa for debugging). */
-        if (!load_egl_api(&mesa_egl, "libEGL_mesa.so", NULL)) {
+        if (!load_egl_api(&mesa_egl, "libEGL_mesa_core.so", NULL)) {
             SHIM_ERR("cannot load Mesa EGL core; shim disabled");
             return;
         }

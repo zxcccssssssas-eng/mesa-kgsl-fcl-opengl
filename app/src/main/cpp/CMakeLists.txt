@@ -13,6 +13,10 @@ target_link_libraries(freedreno_kgsl_init PRIVATE nativewindow log dl)
 # collision, so stubs are only built when those files are absent.
 option(FCL_STUB_MESA_EGL "Build no-op Mesa EGL/GLES/gallium DSOs" ON)
 if(FCL_STUB_MESA_EGL)
+    # Compile the real presenters in metadata CI too; do not package them
+    # without a Mesa core. This catches native regressions in stub builds.
+    add_library(shim_compile_check OBJECT egl_shim.c vulkan_present.c)
+    target_compile_options(shim_compile_check PRIVATE -Wall -Wextra -Werror)
     add_library(EGL_mesa SHARED egl_stub.c)
     target_compile_options(EGL_mesa PRIVATE -fvisibility=default -Wall)
 
@@ -28,9 +32,9 @@ else()
     #  - libGLESv2_mesa.so   GL entry-point shim (glXGetProcAddress -> Mesa EGL
     #                        dispatch, so the game's GL state matches the EGL
     #                        context the presentation shim makes current)
-    add_library(EGL_mesa SHARED egl_shim.c)
+    add_library(EGL_mesa SHARED egl_shim.c vulkan_present.c)
     target_compile_options(EGL_mesa PRIVATE -fvisibility=default -Wall -Wextra)
-    target_link_libraries(EGL_mesa PRIVATE nativewindow log dl)
+    target_link_libraries(EGL_mesa PRIVATE nativewindow log dl vulkan)
 
     add_library(GLESv2_mesa SHARED gles_shim.c)
     target_compile_options(GLESv2_mesa PRIVATE -fvisibility=default -Wall -Wextra)

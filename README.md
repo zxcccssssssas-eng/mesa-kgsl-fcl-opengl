@@ -313,6 +313,41 @@ FCL loads `.so` files from a plugin APK’s `nativeLibraryDir` using the **Boat/
 - AdrenoTools zip — `schemaVersion` / `libraryName` as used by K11MCH1 / whitebelyash Turnip packages
 - EGL zero-copy presentation design (AHardwareBuffer -> `eglGetNativeClientBufferANDROID` -> `eglCreateImageKHR` -> fullscreen blit + `EGL_ANDROID_native_fence_sync`) — [utkarshdalal/GameNative](https://github.com/utkarshdalal/GameNative) (`GPUImage` / `BlitConverter`)
 
+## Presentation switch (1.4.0)
+
+Set **one** of these in FCL's custom environment, then fully restart the game:
+
+| Setting | Presentation path |
+|---|---|
+| `FCL_SHIM_RENDERER=egl` | Default. Mesa pbuffer → shared AHardwareBuffer → vendor EGL/GLES window. |
+| `FCL_SHIM_RENDERER=vulkan` | Mesa pbuffer → synchronized RGBA readback → Vulkan upload → Android swapchain. |
+
+The plugin's launcher screen has buttons to copy these settings. Copying alone
+does not change FCL's environment. An unset or unrecognized value uses EGL.
+Both modes keep **Freedreno/KGSL OpenGL** for game rendering; this is not a
+Zink/Turnip driver switch. Vulkan uses the Android Vulkan loader.
+
+The supplied GameNative rendering report informed the separation of rendering
+from presentation, explicit synchronization, and format handling. Unlike its
+AHB-import Vulkan compositor, this initial Vulkan backend uses a CPU upload.
+It is intended as a compatibility/comparison option, uses FIFO presentation and
+one submitted frame at a time, and costs memory bandwidth. It does not promise
+zero-copy Vulkan or higher frame rates. The existing EGL path retains AHB sharing.
+
+Vulkan negotiates an advertised RGBA8/BGRA8 UNORM surface format, corrects row
+orientation and BGRA byte order, and rebuilds an out-of-date swapchain. If initial
+Vulkan setup fails, the shim releases its native window resources and tries EGL.
+A runtime failure returns an EGL error; restart with `egl` to recover. Vulkan
+currently keeps FIFO even if the game requests a different swap interval.
+
+Rendering fixes include native-fence export with completion fallback, preservation
+of the game's framebuffer/texture/scissor/sRGB and pixel-pack state, framebuffer
+completeness checks, and cleanup of partially initialized AHB rings. Resize drops
+the stale frame instead of displaying a newly allocated, unrendered pbuffer.
+
+Logs: `adb logcat -s EGLShim VulkanShim`. Each window logs its selected backend,
+including fallback, so the actual presentation path can be verified.
+
 ## EGL presentation shim
 
 `libEGL_mesa.so` in this plugin is a small presentation shim, not Mesa itself.
@@ -331,14 +366,15 @@ the shim keeps Mesa off the window entirely:
 game GL -> Mesa context on a pbuffer          (freedreno/kgsl, stable)
 eglSwapBuffers
   -> glBlitFramebuffer: pbuffer FBO0 -> AHardwareBuffer (R8G8B8A8, linear)
-  -> EGL_KHR_fence_sync + eglDupNativeFenceFDANDROID (GPU hand-off)
+  -> EGL_SYNC_NATIVE_FENCE_ANDROID + flush + eglDupNativeFenceFDANDROID
   -> vendor GLES: AHB -> eglGetNativeClientBufferANDROID -> EGLImage ->
      texture -> glBlitFramebuffer -> vendor window surface
   -> vendor eglSwapBuffers (vendor gralloc owns the window buffer)
 ```
 
-Two AHB slots rotate; the vendor's release fence is exported back to Mesa so a
-slot is only overwritten once the vendor is done with it.  The design follows
+Two AHB slots rotate; the vendor's release fence is waited before Mesa reuses
+a slot. If fence export is unavailable, the producer completes its blit with
+`glFinish` before handing the buffer to the consumer.  The design follows
 GameNative's `GPUImage` / `BlitConverter` (AHB -> EGLImage zero-copy +
 native-fence sync); see "Third party" below.
 
