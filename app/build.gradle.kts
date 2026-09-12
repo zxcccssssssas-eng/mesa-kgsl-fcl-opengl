@@ -13,7 +13,7 @@ android {
         minSdk = 29
         targetSdk = 34
         versionCode = 16
-        versionName = "1.4.0"
+        versionName = "1.5.0"
         ndk {
             abiFilters += listOf("arm64-v8a")
         }
@@ -67,6 +67,10 @@ android {
                 "GALLIUM_DRIVER" to "freedreno",
                 "MESA_LOADER_DRIVER_OVERRIDE" to "kgsl",
                 "FD_FORCE_KGSL" to "1",
+                // Mesa 26.3 gates the KGSL dma-buf caps behind this option
+                // (fd_kgsl_dmabuf_enabled()); without it the screen advertises
+                // no DRM_PRIME_CAP_IMPORT and every AHB/window import fails.
+                "FD_KGSL_ENABLE_DMABUF" to "1",
                 "DLOPEN" to dlopenLibs,
             ).entries.joinToString(":") { "${it.key}=${it.value}" }
 
@@ -76,6 +80,10 @@ android {
                 "GALLIUM_DRIVER" to "freedreno",
                 "MESA_LOADER_DRIVER_OVERRIDE" to "kgsl",
                 "FD_FORCE_KGSL" to "1",
+                // Mesa 26.3 gates the KGSL dma-buf caps behind this option
+                // (fd_kgsl_dmabuf_enabled()); without it the screen advertises
+                // no DRM_PRIME_CAP_IMPORT and every AHB/window import fails.
+                "FD_KGSL_ENABLE_DMABUF" to "1",
                 "DLOPEN" to dlopenLibs,
             ).entries.joinToString(":") { "${it.key}=${it.value}" }
 

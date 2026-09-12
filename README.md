@@ -315,6 +315,7 @@ FCL loads `.so` files from a plugin APK’s `nativeLibraryDir` using the **Boat/
 
 ## Presentation switch (1.4.0)
 
+
 Set **one** of these in FCL's custom environment, then fully restart the game:
 
 | Setting | Presentation path |
@@ -359,6 +360,27 @@ the stale frame instead of displaying a newly allocated, unrendered pbuffer.
 
 Logs: `adb logcat -s EGLShim VulkanShim`. Each window logs its selected backend,
 including fallback, so the actual presentation path can be verified.
+
+## Mesa version (26.3.0-devel)
+
+`scripts/build-mesa-android.sh` builds **Mesa 26.3.0-devel**
+(`lfdevs/mesa-for-android-container` tag `mesa-26.3.0-devel-20260824`).
+
+Mesa 26.3 gates the KGSL dma-buf caps behind an option
+(`fd_kgsl_dmabuf_enabled()` → `FD_KGSL_ENABLE_DMABUF` / `XWAYLAND_FORCE_KGSL_SURFACELESS`),
+so the plugin sets **`FD_KGSL_ENABLE_DMABUF=1`** in `boatEnv`, `pojavEnv` and in
+`libfreedreno_kgsl_init.so`'s constructor. Without it the KGSL screen advertises
+no `DRM_PRIME_CAP_IMPORT` and every window/AHB import fails (the failure mode
+26.1 needed a local patch for).
+
+Patch status on 26.3.0:
+
+| Patch | 26.3.0 |
+|---|---|
+| android_stub: link private stubs statically (26.3 dropped the libcutils stub) | applied |
+| android EGL: KGSL fallback when no DRM render node is usable | applied |
+| eglcurrent: allow EGL_OPENGL_API on Android | applied |
+| freedreno: KGSL dma-buf caps | **upstream already has it** (env-gated, see above) |
 
 ## EGL presentation shim
 

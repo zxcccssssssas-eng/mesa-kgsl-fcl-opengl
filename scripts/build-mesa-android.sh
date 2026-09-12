@@ -46,7 +46,9 @@ NDK="${NDK:-${ANDROID_NDK_HOME:-${ANDROID_NDK:-}}}"
 # API 26 (plugin minSdk historically) fails with:
 #   error: 'AHardwareBuffer_isSupported' is unavailable: introduced in Android 29
 SDK_VER="${SDK_VER:-29}"
-MESA_REF="${MESA_REF:-adreno-main}"
+# 26.3.0-devel carries the KGSL dmabuf caps fix upstream; adreno-main was
+# the 26.1.0-devel snapshot this plugin started from.
+MESA_REF="${MESA_REF:-mesa-26.3.0-devel-20260824}"
 MESA_REPO="${MESA_REPO:-https://github.com/lfdevs/mesa-for-android-container.git}"
 DRM_REPO="${DRM_REPO:-https://gitlab.freedesktop.org/mesa/drm.git}"
 MESA_PREFIX="${MESA_PREFIX:-$WORK/mesa-prefix}"
@@ -361,7 +363,9 @@ hw = src / "src" / "android_stub" / "hardware_stub.cpp"
 
 text = meson.read_text(encoding="utf-8")
 marker = "# Private platform libs: link the stubs into the Mesa DSOs"
-old = """  stub_libs = []
+
+# Mesa 26.1/26.2 layout (libcutils stub still present)
+old_v1 = """  stub_libs = []
   lib_names = ['cutils', 'hardware', 'log', 'nativewindow', 'sync']
 
   if with_libbacktrace
@@ -376,7 +380,25 @@ old = """  stub_libs = []
       install : false,
     )
   endforeach"""
-new = """  stub_libs = []
+
+# Mesa 26.3 layout (libcutils stub removed upstream)
+old_v2 = """  stub_libs = []
+  lib_names = ['hardware', 'log', 'nativewindow', 'sync']
+
+  if with_libbacktrace
+    lib_names += ['backtrace']
+  endif
+
+  foreach lib : lib_names
+    stub_libs += shared_library(
+      lib,
+      files(lib + '_stub.cpp'),
+      include_directories : inc_include,
+      install : false,
+    )
+  endforeach"""
+
+new_v1 = """  stub_libs = []
 
   # Private platform libs: link the stubs into the Mesa DSOs (no DT_NEEDED).
   foreach lib : ['cutils', 'hardware']
@@ -388,9 +410,38 @@ new = """  stub_libs = []
     )
   endforeach
 
-  # Public platform libs: keep shared stubs; at runtime the real system
-  # libraries (liblog/libnativewindow/libsync are in public.libraries.txt)
-  # satisfy the DT_NEEDED entries.
+  # Public platform libs: keep shared stubs; the real system libraries
+  # (in public.libraries.txt) satisfy those DT_NEEDED entries at runtime.
+  shared_lib_names = ['log', 'nativewindow', 'sync']
+
+  if with_libbacktrace
+    shared_lib_names += ['backtrace']
+  endif
+
+  foreach lib : shared_lib_names
+    stub_libs += shared_library(
+      lib,
+      files(lib + '_stub.cpp'),
+      include_directories : inc_include,
+      install : false,
+    )
+  endforeach"""
+
+new_v2 = """  stub_libs = []
+
+  # Private platform lib: link the stub into the Mesa DSOs (no DT_NEEDED).
+  # Mesa 26.3 dropped the libcutils stub; only libhardware is private.
+  foreach lib : ['hardware']
+    stub_libs += static_library(
+      lib,
+      files(lib + '_stub.cpp'),
+      include_directories : inc_include,
+      install : false,
+    )
+  endforeach
+
+  # Public platform libs: keep shared stubs; the real system libraries
+  # (in public.libraries.txt) satisfy those DT_NEEDED entries at runtime.
   shared_lib_names = ['log', 'nativewindow', 'sync']
 
   if with_libbacktrace
@@ -408,31 +459,34 @@ new = """  stub_libs = []
 
 if marker in text:
     print("android_stub meson.build already patched", file=sys.stderr)
-elif old in text:
-    meson.write_text(text.replace(old, new, 1), encoding="utf-8")
+elif old_v1 in text:
+    meson.write_text(text.replace(old_v1, new_v1, 1), encoding="utf-8")
     print("patched src/android_stub/meson.build (static cutils/hardware)", file=sys.stderr)
+elif old_v2 in text:
+    meson.write_text(text.replace(old_v2, new_v2, 1), encoding="utf-8")
+    print("patched src/android_stub/meson.build (static hardware; Mesa 26.3 layout)", file=sys.stderr)
 else:
     sys.exit("error: cannot patch src/android_stub/meson.build: unexpected upstream layout")
 
 hw_text = hw.read_text(encoding="utf-8")
-if "*module = NULL" in hw_text:
-    print("hardware_stub.cpp already patched", file=sys.stderr)
-else:
-    old_hw = """int hw_get_module(const char *id, const struct hw_module_t **module)
+old_hw = """int hw_get_module(const char *id, const struct hw_module_t **module)
 {
    return 0;
 }"""
-    new_hw = """int hw_get_module(const char *id, const struct hw_module_t **module)
+new_hw = """int hw_get_module(const char *id, const struct hw_module_t **module)
 {
    if (module)
       *module = NULL;
    /* Report failure so u_gralloc falls back instead of dereferencing NULL. */
    return -1;
 }"""
-    if old_hw not in hw_text:
-        sys.exit("error: cannot patch src/android_stub/hardware_stub.cpp: unexpected upstream layout")
+if "*module = NULL" in hw_text:
+    print("hardware_stub.cpp already patched", file=sys.stderr)
+elif old_hw in hw_text:
     hw.write_text(hw_text.replace(old_hw, new_hw, 1), encoding="utf-8")
     print("patched src/android_stub/hardware_stub.cpp (hw_get_module returns -1)", file=sys.stderr)
+else:
+    sys.exit("error: cannot patch src/android_stub/hardware_stub.cpp: unexpected upstream layout")
 PY
 }
 
@@ -600,6 +654,7 @@ src = pathlib.Path(sys.argv[1])
 path = src / "src" / "gallium" / "drivers" / "freedreno" / "freedreno_screen.c"
 text = path.read_text(encoding="utf-8")
 marker = "KGSL advertises FD_FEATURE_IMPORT_DMABUF"
+upstream_marker = "screen->kgsl_dmabuf"  # Mesa 26.3 already advertises KGSL dmabuf caps
 old = """   u_init_pipe_screen_caps(&screen->base, 1);
 
    /* this is probably not totally correct.. but it's a start: */
@@ -621,6 +676,9 @@ new = """   u_init_pipe_screen_caps(&screen->base, 1);
 """
 if marker in text:
     print("freedreno_screen.c already patched (kgsl dmabuf caps)", file=sys.stderr)
+elif upstream_marker in text:
+    print("freedreno_screen.c advertises KGSL dmabuf caps upstream; skipping patch",
+          file=sys.stderr)
 elif old in text:
     path.write_text(text.replace(old, new, 1), encoding="utf-8")
     print("patched freedreno_screen.c (KGSL dmabuf caps)", file=sys.stderr)

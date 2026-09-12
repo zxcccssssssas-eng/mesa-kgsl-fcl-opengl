@@ -332,6 +332,8 @@ static void fcl_probe_init(void) {
     setenv("GALLIUM_DRIVER", "freedreno", 0);
     setenv("MESA_LOADER_DRIVER_OVERRIDE", "kgsl", 0);
     setenv("FD_FORCE_KGSL", "1", 0);
+    /* Mesa 26.3: advertise KGSL dma-buf import/export caps. */
+    setenv("FD_KGSL_ENABLE_DMABUF", "1", 0);
 
     const char *enabled = getenv("FCL_PROBE");
     if (enabled && enabled[0] == '0') return;
