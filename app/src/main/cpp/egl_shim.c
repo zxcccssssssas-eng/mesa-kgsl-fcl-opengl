@@ -96,6 +96,10 @@ struct egl_api {
 
 struct gl_api {
     void (*GetIntegerv)(GLenum, GLint *);
+    void (*Viewport)(GLint, GLint, GLsizei, GLsizei);
+    void (*Scissor)(GLint, GLint, GLsizei, GLsizei);
+    void (*ClearColor)(GLfloat, GLfloat, GLfloat, GLfloat);
+    void (*Clear)(GLbitfield);
     GLboolean (*IsEnabled)(GLenum);
     void (*Enable)(GLenum);
     void (*Disable)(GLenum);
@@ -181,6 +185,10 @@ static void load_gl_api(struct gl_api *gl, struct egl_api *egl, const char *what
         if (!gl->field) SHIM_ERR("%s: missing GL %s", what, name); \
     } while (0)
     LOAD_GL(GetIntegerv, "glGetIntegerv");
+    LOAD_GL(Viewport, "glViewport");
+    LOAD_GL(Scissor, "glScissor");
+    LOAD_GL(ClearColor, "glClearColor");
+    LOAD_GL(Clear, "glClear");
     LOAD_GL(IsEnabled, "glIsEnabled");
     LOAD_GL(Enable, "glEnable");
     LOAD_GL(Disable, "glDisable");
@@ -454,7 +462,8 @@ static int ring_create(struct shim_surface *s)
              * fallback metadata unambiguous. */
             .usage = AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE |
                      AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT |
-                     AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN,
+                     AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN |
+                     AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN,
         };
         if (AHardwareBuffer_allocate(&desc, &slot->ahb) != 0 || !slot->ahb) {
             SHIM_ERR("ring: AHardwareBuffer_allocate %dx%d failed", s->width, s->height);
@@ -513,8 +522,64 @@ static int ring_create(struct shim_surface *s)
         if (vendor_gl.CheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
             SHIM_ERR("ring: incomplete vendor framebuffer"); goto fail;
         }
+        if (!want_vendor) goto check;
         if (!restore_mesa(d)) goto fail;
         vendor_current = 0;
+        continue;
+
+check:
+        /* One-time probe: is the driver writing the AHB with the layout the
+         * platform reports?  A wrong row pitch shows up as stripe drift. */
+        if (i == 0) {
+            GLint vp[4] = {0, 0, 0, 0};
+            mesa_gl.GetIntegerv(0x0BA2 /* GL_VIEWPORT */, vp);
+            GLboolean scissor = mesa_gl.IsEnabled(0x0C11 /* GL_SCISSOR_TEST */);
+            GLfloat old_clear[4];
+            {
+                typedef void (*glGetFloatv_t)(GLenum, GLfloat *);
+                glGetFloatv_t glGetFloatv = (glGetFloatv_t)mesa_egl.GetProcAddress("glGetFloatv");
+                if (glGetFloatv) glGetFloatv(0x0C22 /* GL_COLOR_CLEAR_VALUE */, old_clear);
+            }
+            mesa_gl.Enable(0x0C11);
+            mesa_gl.Viewport(0, 0, s->width, s->height);
+            int stripe = s->width / 8;
+            for (int k = 0; k < 8; ++k) {
+                int on = (k % 2) == 0;
+                mesa_gl.ClearColor(on ? 1.0f : 0.0f, 0.3f, 0.0f, 1.0f);
+                mesa_gl.Scissor(k * stripe, 0, k == 7 ? s->width - 7 * stripe : stripe, s->height);
+                mesa_gl.Clear(GL_COLOR_BUFFER_BIT);
+            }
+            mesa_gl.Finish();
+            if (!scissor) mesa_gl.Disable(0x0C11);
+            mesa_gl.Viewport(vp[0], vp[1], vp[2], vp[3]);
+
+            AHardwareBuffer_Desc desc;
+            AHardwareBuffer_describe(slot->ahb, &desc);
+            void *ptr = NULL;
+            if (AHardwareBuffer_lock(slot->ahb, AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN, -1, NULL,
+                                     &ptr) == 0 && ptr) {
+                const uint8_t *px = ptr;
+                int first = -1, drift = 0;
+                for (int y = 0; y < s->height; y += s->height / 16) {
+                    const uint8_t *row = px + (size_t)y * desc.stride * 4;
+                    int edge = -1;
+                    for (int x = 4; x < s->width && x < 1600; x += 4) {
+                        int d = (int)row[x * 4] - (int)row[(x - 4) * 4];
+                        if (d > 100 || d < -100) { edge = x; break; }
+                    }
+                    if (edge < 0) continue;
+                    if (first < 0) first = edge;
+                    else if (edge != first) drift++;
+                }
+                SHIM_LOG("AHB layout self-check: stride=%u px, first stripe edge=%d, drifting rows=%d",
+                         desc.stride, first, drift);
+                if (drift > 2)
+                    SHIM_ERR("AHB layout mismatch: Mesa writes with a different row pitch than the "
+                             "platform reports (image will be sheared)");
+                AHardwareBuffer_unlock(slot->ahb, NULL);
+            }
+        }
+        continue;
     }
 
     /* restore Mesa as current (caller had it current) */
@@ -951,6 +1016,13 @@ EGLSurface eglCreateWindowSurface(EGLDisplay dpy, EGLConfig config,
     s->is_window = 1;
     s->vk = vk;
     s->vk_ahb = vk ? vk_present_ahb_available(vk) : 0;
+    {
+        const char *ahb_env = getenv("FCL_SHIM_VK_AHB");
+        if (s->vk_ahb && ahb_env && ahb_env[0] == '0') {
+            s->vk_ahb = 0;
+            SHIM_LOG("FCL_SHIM_VK_AHB=0: forcing CPU upload presentation");
+        }
+    }
     SHIM_LOG("presentation backend: %s", vk
                  ? (s->vk_ahb ? "vulkan (zero-copy AHB)" : "vulkan (CPU upload)")
                  : "egl (AHB)");
