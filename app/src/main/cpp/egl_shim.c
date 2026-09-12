@@ -248,6 +248,7 @@ struct shim_ring_slot {
 struct shim_surface {
     struct shim_display *dpy;
     int is_window;
+    int mesa_window;  /* zink mode: Mesa owns the window surface (no AHB/presenter) */
     struct vk_present *vk;
     int vk_ahb;       /* zero-copy AHB sampling available/selected */
     uint8_t *pixels;
@@ -283,6 +284,11 @@ static __thread struct shim_surface *tls_read;
 
 static __thread EGLint shim_error = EGL_SUCCESS;
 static __thread EGLenum shim_api = EGL_OPENGL_ES_API;
+/* FCL_SHIM_GALLIUM=zink: render through zink and let Mesa present the window
+ * itself (the droid window path FCL's built-in Zink uses); the AHB ring and the
+ * vendor/Vulkan presenters stay unused because zink cannot import our AHBs on
+ * this driver (no VK_EXT_image_drm_format_modifier). */
+static int shim_zink_mode;
 
 static EGLint set_error(EGLint err)
 {
@@ -750,7 +756,13 @@ static int shim_present(struct shim_surface *s, struct shim_context *ctx)
 
     /* Track window size changes (FCL recreates the surface, but be safe). */
     EGLint w = 0, h = 0;
-    if (s->vk) {
+    if (s->mesa_window) {
+        mesa_egl.QuerySurface(d->mesa_dpy, s->mesa_surface, EGL_WIDTH, &w);
+        mesa_egl.QuerySurface(d->mesa_dpy, s->mesa_surface, EGL_HEIGHT, &h);
+        s->width = w > 0 ? w : s->width;
+        s->height = h > 0 ? h : s->height;
+        return 1; /* nothing else to do for the Mesa window surface */
+    } else if (s->vk) {
         if (!vk_present_size(s->vk, &w, &h)) return 0;
     } else {
         vendor_egl.QuerySurface(d->vendor_dpy, s->vendor_window, EGL_WIDTH, &w);
@@ -773,6 +785,17 @@ static int shim_present(struct shim_surface *s, struct shim_context *ctx)
         free(s->pixels); s->pixels = NULL;
         s->width = w; s->height = h;
         return 1; /* New pbuffer has no rendered content until the next frame. */
+    }
+    if (s->mesa_window) {
+        /* zink mode: the Mesa window surface is already current; let Mesa/zink
+         * present it (no readback, no AHB, no vendor GLES). */
+        EGLBoolean ok = mesa_egl.SwapBuffers(d->mesa_dpy, s->mesa_surface);
+        if (!ok) {
+            SHIM_ERR("Mesa eglSwapBuffers failed: 0x%x", mesa_egl.GetError());
+            set_error(EGL_BAD_SURFACE);
+            return 0;
+        }
+        return 1;
     }
     if (s->vk) {
         if (s->vk_ahb && vk_present_ahb_available(s->vk)) {
@@ -965,6 +988,30 @@ EGLSurface eglCreateWindowSurface(EGLDisplay dpy, EGLConfig config,
         set_error(EGL_BAD_NATIVE_WINDOW);
         return EGL_NO_SURFACE;
     }
+    if (shim_zink_mode) {
+        EGLSurface mwin = mesa_egl.CreateWindowSurface(d->mesa_dpy, config, win, attrib_list);
+        if (mwin == EGL_NO_SURFACE) {
+            SHIM_ERR("zink mode: Mesa eglCreateWindowSurface failed: 0x%x", mesa_egl.GetError());
+            set_error(EGL_BAD_NATIVE_WINDOW);
+            return EGL_NO_SURFACE;
+        }
+        struct shim_surface *zs = calloc(1, sizeof(*zs));
+        zs->dpy = d;
+        zs->is_window = 1;
+        zs->mesa_window = 1;
+        zs->mesa_config = config;
+        zs->mesa_surface = mwin;
+        for (int i = 0; i < RING_SIZE; i++)
+            zs->ring[i].vendor_fence_fd = -1;
+        EGLint zw = 0, zh = 0;
+        mesa_egl.QuerySurface(d->mesa_dpy, mwin, EGL_WIDTH, &zw);
+        mesa_egl.QuerySurface(d->mesa_dpy, mwin, EGL_HEIGHT, &zh);
+        zs->width = zw > 0 ? zw : 16;
+        zs->height = zh > 0 ? zh : 16;
+        SHIM_LOG("window surface %p (%dx%d, Mesa window, zink present)",
+                 (void *)zs, zs->width, zs->height);
+        return (EGLSurface)zs;
+    }
     const char *backend = getenv("FCL_SHIM_RENDERER");
     struct vk_present *vk = NULL;
     if (backend && !strcmp(backend, "vulkan")) {
@@ -1148,6 +1195,8 @@ EGLBoolean eglSwapInterval(EGLDisplay dpy, EGLint interval)
     struct shim_display *d = (struct shim_display *)dpy;
     if (!d)
         return EGL_FALSE;
+    if (tls_draw && tls_draw->mesa_window)
+        return mesa_egl.SwapInterval(d->mesa_dpy, interval);
     if (tls_draw && tls_draw->vk) return EGL_TRUE; /* Vulkan uses FIFO. */
     if (tls_draw && tls_draw->is_window) {
         if (!vendor_egl.MakeCurrent(d->vendor_dpy, tls_draw->vendor_window,
@@ -1167,6 +1216,8 @@ EGLBoolean eglQuerySurface(EGLDisplay dpy, EGLSurface surface, EGLint attribute,
         set_error(EGL_BAD_SURFACE);
         return EGL_FALSE;
     }
+    if (s->is_window && s->mesa_window)
+        return mesa_egl.QuerySurface(d->mesa_dpy, s->mesa_surface, attribute, value);
     if (s->is_window && (attribute == EGL_WIDTH || attribute == EGL_HEIGHT)) {
         if (s->vk) {
             int w, h;
@@ -1298,6 +1349,8 @@ static void shim_init(void)
 {
     char path[4096];
     const char *dir = self_dir();
+    const char *gallium = getenv("FCL_SHIM_GALLIUM");
+    shim_zink_mode = gallium && strcmp(gallium, "zink") == 0;
 
     snprintf(path, sizeof(path), "%s/libEGL_mesa_core.so", dir);
     if (!load_egl_api(&mesa_egl, path, NULL)) {
