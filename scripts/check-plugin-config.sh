@@ -22,6 +22,12 @@ check "KGSL env constructor source exists" test -f "${ROOT}/app/src/main/cpp/kgs
 check "Mesa NDK build script exists" test -x "${ROOT}/scripts/build-mesa-android.sh" -o -f "${ROOT}/scripts/build-mesa-android.sh"
 check "libdrm meson flags are probed from meson_options.txt" \
   grep -q 'drm_has_option' "${ROOT}/scripts/build-mesa-android.sh"
+check "build script always resyncs the cached Mesa checkout" \
+  grep -q 'always resync the checkout with MESA_REF' "${ROOT}/scripts/build-mesa-android.sh"
+check "build script verifies the packaged Mesa version" \
+  grep -q 'verify_mesa_version' "${ROOT}/scripts/build-mesa-android.sh"
+check "default Mesa ref is 26.3.0-devel" \
+  grep -q 'MESA_REF:-mesa-26.3.0-devel-20260824' "${ROOT}/scripts/build-mesa-android.sh"
 check "Mesa meson flags are probed from meson.options" \
   grep -q 'mesa_flags' "${ROOT}/scripts/build-mesa-android.sh"
 check "libdrm setup does not hardcode -Dfreedreno=enabled as a meson arg" \

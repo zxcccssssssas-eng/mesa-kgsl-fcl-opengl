@@ -492,6 +492,26 @@ PY
 
 # Fail the build if a packaged DSO still has DT_NEEDED on a private platform
 # library that Android app namespaces cannot resolve.
+# Fail if the packaged Mesa DSOs do not carry the version of the source tree we
+# just built (guards against stale caches / mismatched refs).
+verify_mesa_version() {
+  local src="${MESA_SRC:-$WORK/mesa}"
+  local want=""
+  [[ -f "${src}/VERSION" ]] && want="$(head -n1 "${src}/VERSION" | tr -d '[:space:]')"
+  [[ -n "${want}" ]] || { log "WARN: no VERSION in ${src}; skipping Mesa version check"; return 0; }
+  local found=0 so
+  for so in "${OUT_JNI}"/libgallium*.so "${OUT_JNI}"/libEGL*.so "${OUT_JNI}"/libGLESv2*.so; do
+    [[ -f "${so}" ]] || continue
+    if grep -aqF "${want}" "${so}"; then
+      found=1
+      log "$(basename "${so}") carries Mesa ${want}"
+    fi
+  done
+  if [[ "${found}" -eq 0 ]]; then
+    die "packaged Mesa DSOs do not contain '${want}' - stale cache or wrong MESA_REF?"
+  fi
+}
+
 verify_no_private_deps() {
   local readelf_bin=""
   if command -v llvm-readelf >/dev/null 2>&1; then
@@ -689,9 +709,9 @@ PYEOF
 
 build_mesa() {
   local src="${MESA_SRC:-$WORK/mesa}"
-  if [[ ! -d "${src}/.git" ]]; then
-    clone_if_needed "${src}" "${MESA_REPO}" "${MESA_REF}"
-  fi
+  # CI caches $WORK (.native-build): always resync the checkout with MESA_REF so
+  # a cached tree cannot silently keep building the previous Mesa release.
+  clone_if_needed "${src}" "${MESA_REPO}" "${MESA_REF}"
   patch_mesa_android_stub "${src}"
   patch_mesa_android_kgsl "${src}"
   patch_mesa_android_desktopgl "${src}"
@@ -833,6 +853,7 @@ package_libs() {
     "$(ndk_prebuilt)/bin/llvm-strip" -S "${OUT_JNI}"/*.so || true
   fi
 
+  verify_mesa_version
   verify_no_private_deps
 
   log "jniLibs payload:"
