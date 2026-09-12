@@ -83,7 +83,14 @@ struct vk_present {
     VkDescriptorSetLayout dsl;
     VkDescriptorPool dpool;
     VkSampler sampler;
-    VkFramebuffer *fbs;
+    /* Offscreen render targets: the sampled AHB is drawn here first, then
+     * copied into the acquired swapchain image.  FCL's window is a TextureView
+     * whose surface only advertises TRANSFER_DST, so rendering into the
+     * swapchain image directly is not available. */
+    VkImage off_img[MAX_FRAMES];
+    VkDeviceMemory off_mem[MAX_FRAMES];
+    VkImageView off_view[MAX_FRAMES];
+    VkFramebuffer off_fb[MAX_FRAMES];
     struct vk_ahb_slot slots[MAX_AHB_SLOTS];
     int slot_count;
 
@@ -98,13 +105,56 @@ struct vk_present {
 /* swapchain                                                          */
 /* ------------------------------------------------------------------ */
 
-static void destroy_framebuffers(struct vk_present *p)
+static void destroy_offscreen(struct vk_present *p)
 {
-    if (!p->fbs) return;
-    for (uint32_t i = 0; i < p->count; ++i)
-        if (p->fbs[i]) vkDestroyFramebuffer(p->device, p->fbs[i], NULL);
-    free(p->fbs);
-    p->fbs = NULL;
+    for (int i = 0; i < MAX_FRAMES; ++i) {
+        if (p->off_fb[i]) { vkDestroyFramebuffer(p->device, p->off_fb[i], NULL); p->off_fb[i] = VK_NULL_HANDLE; }
+        if (p->off_view[i]) { vkDestroyImageView(p->device, p->off_view[i], NULL); p->off_view[i] = VK_NULL_HANDLE; }
+        if (p->off_img[i]) { vkDestroyImage(p->device, p->off_img[i], NULL); p->off_img[i] = VK_NULL_HANDLE; }
+        if (p->off_mem[i]) { vkFreeMemory(p->device, p->off_mem[i], NULL); p->off_mem[i] = VK_NULL_HANDLE; }
+    }
+}
+
+static int create_offscreen(struct vk_present *p)
+{
+    if (!p->rp) return 1; /* zero-copy pipeline not initialised yet */
+    destroy_offscreen(p);
+    for (int i = 0; i < MAX_FRAMES; ++i) {
+        VkImageCreateInfo ici = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+            .imageType = VK_IMAGE_TYPE_2D, .format = p->format,
+            .extent = { p->extent.width, p->extent.height, 1 }, .mipLevels = 1, .arrayLayers = 1,
+            .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
+            .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED };
+        TRY(vkCreateImage(p->device, &ici, NULL, &p->off_img[i]));
+        VkMemoryRequirements req;
+        vkGetImageMemoryRequirements(p->device, p->off_img[i], &req);
+        VkPhysicalDeviceMemoryProperties props;
+        vkGetPhysicalDeviceMemoryProperties(p->gpu, &props);
+        uint32_t type = UINT32_MAX;
+        for (uint32_t j = 0; j < props.memoryTypeCount; ++j)
+            if ((req.memoryTypeBits & (1u << j)) &&
+                (props.memoryTypes[j].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
+            { type = j; break; }
+        if (type == UINT32_MAX) goto fail;
+        VkMemoryAllocateInfo ma = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+            .allocationSize = req.size, .memoryTypeIndex = type };
+        TRY(vkAllocateMemory(p->device, &ma, NULL, &p->off_mem[i]));
+        TRY(vkBindImageMemory(p->device, p->off_img[i], p->off_mem[i], 0));
+        VkImageViewCreateInfo vi = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .image = p->off_img[i], .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = p->format,
+            .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
+        TRY(vkCreateImageView(p->device, &vi, NULL, &p->off_view[i]));
+        VkFramebufferCreateInfo fi = { .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+            .renderPass = p->rp, .attachmentCount = 1, .pAttachments = &p->off_view[i],
+            .width = p->extent.width, .height = p->extent.height, .layers = 1 };
+        TRY(vkCreateFramebuffer(p->device, &fi, NULL, &p->off_fb[i]));
+    }
+    return 1;
+fail:
+    LOG("offscreen render target creation failed");
+    destroy_offscreen(p);
+    return 0;
 }
 
 static void drop_swapchain(struct vk_present *p)
@@ -112,7 +162,7 @@ static void drop_swapchain(struct vk_present *p)
     if (!p->device) return;
     vkDeviceWaitIdle(p->device);
 
-    destroy_framebuffers(p);
+    destroy_offscreen(p);
 
     for (int i = 0; i < MAX_FRAMES; ++i) {
         if (p->imported[i]) { vkDestroySemaphore(p->device, p->imported[i], NULL); p->imported[i] = VK_NULL_HANDLE; }
@@ -186,23 +236,6 @@ fail:
     return 0;
 }
 
-static int create_framebuffers(struct vk_present *p)
-{
-    if (!p->ahb_ok || !p->rp) return 1;
-    p->fbs = calloc(p->count, sizeof(*p->fbs));
-    if (!p->fbs) return 0;
-    for (uint32_t i = 0; i < p->count; ++i) {
-        VkFramebufferCreateInfo fi = { .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
-            .renderPass = p->rp, .attachmentCount = 1, .pAttachments = &p->views[i],
-            .width = p->extent.width, .height = p->extent.height, .layers = 1 };
-        if (vkCreateFramebuffer(p->device, &fi, NULL, &p->fbs[i]) != VK_SUCCESS) {
-            LOG("vkCreateFramebuffer failed");
-            return 0;
-        }
-    }
-    return 1;
-}
-
 static int make_swapchain(struct vk_present *p)
 {
     VkSurfaceCapabilitiesKHR caps;
@@ -211,10 +244,10 @@ static int make_swapchain(struct vk_present *p)
     if (vkGetPhysicalDeviceSurfaceCapabilitiesKHR(p->gpu, p->surface, &caps) != VK_SUCCESS)
         return 0;
     VkImageUsageFlags usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-    p->can_ahb = (caps.supportedUsageFlags & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) &&
-                 (caps.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_DST_BIT) &&
+    /* The zero-copy path renders offscreen and copies into the swapchain image,
+     * so only TRANSFER_DST is required from the surface. */
+    p->can_ahb = (caps.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_DST_BIT) &&
                  (caps.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR);
-    if (p->can_ahb) usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     if (!(caps.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_DST_BIT) ||
         !(caps.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR)) goto fail;
 
@@ -276,7 +309,7 @@ static int make_swapchain(struct vk_present *p)
     for (uint32_t i = 0; i < p->count; ++i)
         TRY(vkCreateSemaphore(p->device, &sem, NULL, &p->complete[i]));
     if (!create_per_frame(p)) goto fail;
-    if (!create_framebuffers(p)) goto fail;
+    if (!create_offscreen(p)) goto fail;
     p->frame = 0;
     return 1;
 
@@ -516,7 +549,7 @@ int vk_present_frame_ahb(struct vk_present *p, AHardwareBuffer *ahb, int fence_f
     vkCmdSetScissor(p->cmd[f], 0, 1, &scissor);
 
     VkRenderPassBeginInfo rp = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
-        .renderPass = p->rp, .framebuffer = p->fbs[index], .renderArea = scissor };
+        .renderPass = p->rp, .framebuffer = p->off_fb[f], .renderArea = scissor };
     vkCmdBeginRenderPass(p->cmd[f], &rp, VK_SUBPASS_CONTENTS_INLINE);
     vkCmdBindPipeline(p->cmd[f], VK_PIPELINE_BIND_POINT_GRAPHICS, p->pipe);
     vkCmdBindDescriptorSets(p->cmd[f], VK_PIPELINE_BIND_POINT_GRAPHICS, p->pl, 0, 1, &slot->ds, 0, NULL);
@@ -525,7 +558,34 @@ int vk_present_frame_ahb(struct vk_present *p, AHardwareBuffer *ahb, int fence_f
     vkCmdDraw(p->cmd[f], 3, 1, 0, 0);
     vkCmdEndRenderPass(p->cmd[f]);
 
-    /* The render pass's finalLayout already moved the image to PRESENT_SRC_KHR. */
+    /* Copy the offscreen frame into the acquired swapchain image. */
+    VkImageMemoryBarrier to_dst = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .srcAccessMask = 0, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED, .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = p->images[index],
+        .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
+    vkCmdPipelineBarrier(p->cmd[f], VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         0, 0, NULL, 0, NULL, 1, &to_dst);
+
+    VkImageCopy region = { .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+                           .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+                           .extent = { p->extent.width, p->extent.height, 1 } };
+    vkCmdCopyImage(p->cmd[f], p->off_img[f], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                   p->images[index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+    VkImageMemoryBarrier to_present = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = 0,
+        .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = p->images[index],
+        .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
+    vkCmdPipelineBarrier(p->cmd[f], VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                         0, 0, NULL, 0, NULL, 1, &to_present);
     TRY(vkEndCommandBuffer(p->cmd[f]));
 
     VkSubmitInfo submit = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
@@ -579,7 +639,7 @@ static int ahb_pipeline_init(struct vk_present *p)
         .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE, .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
         .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
         .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED, .finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR };
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED, .finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL };
     VkAttachmentReference ref = { 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
     VkSubpassDescription sub = { .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
         .colorAttachmentCount = 1, .pColorAttachments = &ref };
@@ -661,6 +721,10 @@ static int ahb_pipeline_init(struct vk_present *p)
     TRY(vkCreateDescriptorPool(p->device, &dp, NULL, &p->dpool));
 
     p->ahb_ok = 1;
+    if (!create_offscreen(p)) {
+        p->ahb_ok = 0;
+        return 0;
+    }
     return 1;
 fail:
     return 0;
@@ -839,10 +903,15 @@ struct vk_present *vk_present_create(ANativeWindow *window)
     TRY(vkCreateSemaphore(p->device, &sem, NULL, &p->acquired));
     if (!make_swapchain(p)) goto fail;
 
+    if (!p->can_ahb)
+        LOG("surface does not support the required usage/transform; CPU upload only");
+    else if (!p->ImportSemaphoreFdKHR)
+        LOG("vkImportSemaphoreFdKHR unavailable; CPU upload only");
+    else if (!p->GetAHBProperties)
+        LOG("vkGetAndroidHardwareBufferPropertiesANDROID unavailable; CPU upload only");
     if (p->can_ahb && p->ImportSemaphoreFdKHR && p->GetAHBProperties) {
-        if (!ahb_pipeline_init(p) || !create_framebuffers(p)) {
+        if (!ahb_pipeline_init(p)) {
             LOG("zero-copy pipeline unavailable; using CPU upload");
-            destroy_framebuffers(p);
             p->ahb_ok = 0;
         } else {
             LOGI("ready: %ux%u format=%d (zero-copy AHB + CPU upload fallback)",
@@ -864,7 +933,7 @@ void vk_present_destroy(struct vk_present *p)
     if (!p) return;
     if (p->device) {
         vkDeviceWaitIdle(p->device);
-        destroy_framebuffers(p);
+        destroy_offscreen(p);
         destroy_slots(p);
         for (int i = 0; i < MAX_FRAMES; ++i) {
             if (p->imported[i]) vkDestroySemaphore(p->device, p->imported[i], NULL);
