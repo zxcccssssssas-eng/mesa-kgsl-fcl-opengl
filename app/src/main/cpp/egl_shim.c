@@ -24,6 +24,7 @@
 
 #include "vulkan_present.h"
 #include <poll.h>
+#include <time.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -533,6 +534,23 @@ fail:
 /* ------------------------------------------------------------------ */
 /* presentation                                                       */
 /* ------------------------------------------------------------------ */
+
+static void frame_tick(void)
+{
+    static struct timespec last;
+    static unsigned frames;
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    frames++;
+    if (last.tv_sec == 0) { last = now; return; }
+    double dt = (double)(now.tv_sec - last.tv_sec) +
+                (double)(now.tv_nsec - last.tv_nsec) / 1e9;
+    if (dt >= 5.0) {
+        SHIM_LOG("present fps: %.1f (%u frames / %.1fs)", (double)frames / dt, frames, dt);
+        frames = 0;
+        last = now;
+    }
+}
 
 static int fence_wait(struct egl_api *api, EGLDisplay dpy, int fd)
 {
@@ -1050,6 +1068,7 @@ EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface)
         set_error(EGL_BAD_SURFACE);
         return EGL_FALSE;
     }
+    frame_tick();
     return EGL_TRUE;
 }
 
