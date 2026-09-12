@@ -320,7 +320,7 @@ Set **one** of these in FCL's custom environment, then fully restart the game:
 | Setting | Presentation path |
 |---|---|
 | `FCL_SHIM_RENDERER=egl` | Default. Mesa pbuffer → shared AHardwareBuffer → vendor EGL/GLES window. |
-| `FCL_SHIM_RENDERER=vulkan` | Mesa pbuffer → synchronized RGBA readback → Vulkan upload → Android swapchain. |
+| `FCL_SHIM_RENDERER=vulkan` | Mesa pbuffer → shared AHardwareBuffer → imported `VkImage` → fullscreen triangle → Android swapchain (zero copy). Falls back to a synchronized CPU upload when the AHB import or the graphics pipeline is unavailable. |
 
 The plugin's launcher screen has buttons to copy these settings. Copying alone
 does not change FCL's environment. An unset or unrecognized value uses EGL.
@@ -328,11 +328,23 @@ Both modes keep **Freedreno/KGSL OpenGL** for game rendering; this is not a
 Zink/Turnip driver switch. Vulkan uses the Android Vulkan loader.
 
 The supplied GameNative rendering report informed the separation of rendering
-from presentation, explicit synchronization, and format handling. Unlike its
-AHB-import Vulkan compositor, this initial Vulkan backend uses a CPU upload.
-It is intended as a compatibility/comparison option, uses FIFO presentation and
-one submitted frame at a time, and costs memory bandwidth. It does not promise
-zero-copy Vulkan or higher frame rates. The existing EGL path retains AHB sharing.
+from presentation, explicit synchronization, and format handling.
+
+Vulkan zero-copy details:
+
+* The AHB ring used by the EGL path is imported with
+  `VK_ANDROID_external_memory_android_hardware_buffer`
+  (`vkGetAndroidHardwareBufferPropertiesANDROID` + dedicated allocation) and
+  sampled by a fullscreen triangle, so no readback and no upload happen.
+* The producer's native fence is imported as a `SYNC_FD` semaphore
+  (`VK_KHR_external_semaphore_fd`) and waited on in the queue (GPU side).
+* The GL bottom-up orientation is flipped in the vertex shader; a push constant
+  swaps R/B only when the swapchain is B8G8R8A8.
+* Two frames in flight, one submission per frame, FIFO presentation. A swapchain
+  reported as SUBOPTIMAL is rebuilt only when the condition persists (never per
+  frame).
+* If the import, pipeline or the first submission fails, the surface falls back
+  to the CPU upload path (GL_BGRA readback + staging copy) and keeps presenting.
 
 Vulkan negotiates an advertised RGBA8/BGRA8 UNORM surface format, corrects row
 orientation and BGRA byte order, and rebuilds an out-of-date swapchain. If initial

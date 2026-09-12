@@ -240,6 +240,7 @@ struct shim_surface {
     struct shim_display *dpy;
     int is_window;
     struct vk_present *vk;
+    int vk_ahb;       /* zero-copy AHB sampling available/selected */
     uint8_t *pixels;
     EGLConfig mesa_config;
     EGLSurface mesa_surface;
@@ -395,6 +396,7 @@ static void ring_slot_destroy(struct shim_display *d, struct shim_ring_slot *slo
 
 static void ring_destroy(struct shim_surface *s)
 {
+    if (s->vk) vk_present_idle(s->vk);
     for (int i = 0; i < RING_SIZE; i++) {
         if (s->ring_ctx) {
             if (!mesa_egl.MakeCurrent(s->dpy->mesa_dpy, s->mesa_surface, s->mesa_surface,
@@ -425,11 +427,14 @@ static int ring_create(struct shim_surface *s)
         SHIM_ERR("ring: required AHB import entry points missing");
         return 0;
     }
-    if (!vendor_gl.GenTextures && d->vendor_ok)
-        load_gl_api(&vendor_gl, &vendor_egl, "vendor");
-    if (!vendor_gl.GenTextures || !vendor_gl.EGLImageTargetTexture2DOES) {
-        SHIM_ERR("ring: vendor GL entry points missing");
-        return 0;
+    int want_vendor = (s->vk == NULL); /* Vulkan samples the AHB itself */
+    if (want_vendor) {
+        if (!vendor_gl.GenTextures && d->vendor_ok)
+            load_gl_api(&vendor_gl, &vendor_egl, "vendor");
+        if (!vendor_gl.GenTextures || !vendor_gl.EGLImageTargetTexture2DOES) {
+            SHIM_ERR("ring: vendor GL entry points missing");
+            return 0;
+        }
     }
     mesa_egl.BindAPI(shim_api);
 
@@ -479,7 +484,8 @@ static int ring_create(struct shim_surface *s)
         if (mesa_gl.CheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
             SHIM_ERR("ring: incomplete Mesa framebuffer"); goto fail;
         }
-        /* Vendor side: texture sampled by the presentation blit. */
+        /* Vendor side: texture sampled by the presentation blit (EGL backend). */
+        if (!want_vendor) continue;
         if (!vendor_current) {
             if (!vendor_egl.MakeCurrent(d->vendor_dpy, d->vendor_scratch, d->vendor_scratch,
                                         d->vendor_ctx)) {
@@ -530,8 +536,20 @@ fail:
 
 static int fence_wait(struct egl_api *api, EGLDisplay dpy, int fd)
 {
-    (void)api; (void)dpy;
     if (fd < 0) return 1;
+    /* GPU-side wait when the display supports EGL_KHR_wait_sync: the consumer
+     * queue waits on the fence in hardware instead of blocking the CPU. */
+    if (api->CreateSyncKHR && api->DestroySyncKHR && api->WaitSyncKHR) {
+        const EGLint attribs[] = { EGL_SYNC_NATIVE_FENCE_FD_ANDROID, fd, EGL_NONE };
+        EGLSyncKHR sync = api->CreateSyncKHR(dpy, EGL_SYNC_NATIVE_FENCE_ANDROID, attribs);
+        if (sync != EGL_NO_SYNC_KHR) {
+            EGLBoolean ok = api->WaitSyncKHR(dpy, sync, 0);
+            api->DestroySyncKHR(dpy, sync); /* consumes the fd */
+            return ok == EGL_TRUE;
+        }
+        close(fd); /* not consumed on failure */
+        return 0;
+    }
     struct pollfd pfd = { .fd = fd, .events = POLLIN };
     int result;
     do { result = poll(&pfd, 1, -1); } while (result < 0 && errno == EINTR);
@@ -579,7 +597,10 @@ static int vulkan_present(struct shim_surface *s)
     mesa_gl.PixelStorei(GL_PACK_ROW_LENGTH, 0);
     mesa_gl.PixelStorei(GL_PACK_SKIP_ROWS, 0);
     mesa_gl.PixelStorei(GL_PACK_SKIP_PIXELS, 0);
-    mesa_gl.ReadPixels(0, 0, s->width, s->height, GL_RGBA, GL_UNSIGNED_BYTE, s->pixels);
+    /* Feed the swapchain its native channel order: desktop GL supports
+     * GL_BGRA readback, which removes the per-frame CPU channel swap. */
+    GLenum read_format = vk_present_prefers_bgra(s->vk) ? 0x80E1 /* GL_BGRA */ : GL_RGBA;
+    mesa_gl.ReadPixels(0, 0, s->width, s->height, read_format, GL_UNSIGNED_BYTE, s->pixels);
     mesa_gl.ReadBuffer(read);
     mesa_gl.BindBuffer(GL_PIXEL_PACK_BUFFER, pack);
     mesa_gl.PixelStorei(GL_PACK_ALIGNMENT, align);
@@ -593,6 +614,44 @@ static int vulkan_present(struct shim_surface *s)
         for (size_t x = 0; x < row; ++x) { uint8_t t = a[x]; a[x] = b[x]; b[x] = t; }
     }
     return vk_present_frame(s->vk, s->pixels, s->width, s->height);
+}
+
+/* Mesa: pbuffer FBO 0 -> the ring slot's AHB FBO.  Returns the native fence
+ * fd for the blit (>= 0), or -1 when the export was unavailable and the blit
+ * was completed with glFinish instead. */
+static int blit_to_slot(struct shim_surface *s, struct shim_ring_slot *slot)
+{
+    struct saved_gl saved = save_gl();
+    mesa_gl.BindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+    mesa_gl.BindFramebuffer(GL_DRAW_FRAMEBUFFER, slot->mesa_fbo);
+    GLint read_buffer, doublebuffer = 1;
+    mesa_gl.GetIntegerv(GL_READ_BUFFER, &read_buffer);
+    if (shim_api == EGL_OPENGL_API) mesa_gl.GetIntegerv(0x0C32 /* GL_DOUBLEBUFFER */, &doublebuffer);
+    mesa_gl.ReadBuffer(doublebuffer ? GL_BACK : GL_FRONT);
+    mesa_gl.BlitFramebuffer(0, 0, s->width, s->height, 0, 0, s->width, s->height,
+                            GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    mesa_gl.ReadBuffer(read_buffer);
+    mesa_gl.BindFramebuffer(GL_FRAMEBUFFER, 0);
+    mesa_gl.Flush();
+    int fd = fence_export(&mesa_egl, &mesa_gl, s->dpy->mesa_dpy);
+    restore_gl(saved);
+    return fd;
+}
+
+/* Zero-copy Vulkan presentation: Mesa renders into the ring AHB, the AHB is
+ * imported as a VkImage and sampled by a fullscreen triangle.  Returns 1 on
+ * success, -1 to fall back to the CPU upload path. */
+static int vulkan_present_ahb(struct shim_surface *s)
+{
+    if (!ring_create(s)) return -1;
+    struct shim_ring_slot *slot = &s->ring[s->cur];
+    if (!vk_present_ahb_slot_wait(s->vk, slot->ahb)) return -1;
+    int fd = blit_to_slot(s, slot);
+    /* vk_present_frame_ahb takes ownership of fd even on failure. */
+    if (!vk_present_frame_ahb(s->vk, slot->ahb, fd, s->width, s->height))
+        return -1;
+    s->cur ^= 1;
+    return 1;
 }
 
 static int shim_present(struct shim_surface *s, struct shim_context *ctx)
@@ -633,7 +692,15 @@ static int shim_present(struct shim_surface *s, struct shim_context *ctx)
         s->width = w; s->height = h;
         return 1; /* New pbuffer has no rendered content until the next frame. */
     }
-    if (s->vk) return vulkan_present(s);
+    if (s->vk) {
+        if (s->vk_ahb && vk_present_ahb_available(s->vk)) {
+            int r = vulkan_present_ahb(s);
+            if (r == 1) return 1;
+            s->vk_ahb = 0;
+            SHIM_LOG("zero-copy AHB presentation failed; using CPU upload fallback");
+        }
+        return vulkan_present(s);
+    }
     struct saved_gl saved = save_gl();
 
     if (!ring_create(s)) { restore_gl(saved); return 0; }
@@ -647,19 +714,7 @@ static int shim_present(struct shim_surface *s, struct shim_context *ctx)
         if (!ok) { restore_gl(saved); return 0; }
     }
 
-    /* Mesa: pbuffer FBO 0 -> AHB FBO. */
-    mesa_gl.BindFramebuffer(GL_READ_FRAMEBUFFER, 0);
-    mesa_gl.BindFramebuffer(GL_DRAW_FRAMEBUFFER, slot->mesa_fbo);
-    GLint read_buffer, doublebuffer = 1;
-    mesa_gl.GetIntegerv(GL_READ_BUFFER, &read_buffer);
-    if (shim_api == EGL_OPENGL_API) mesa_gl.GetIntegerv(0x0C32 /* GL_DOUBLEBUFFER */, &doublebuffer);
-    mesa_gl.ReadBuffer(doublebuffer ? GL_BACK : GL_FRONT);
-    mesa_gl.BlitFramebuffer(0, 0, s->width, s->height, 0, 0, s->width, s->height,
-                            GL_COLOR_BUFFER_BIT, GL_NEAREST);
-    mesa_gl.ReadBuffer(read_buffer);
-    mesa_gl.BindFramebuffer(GL_FRAMEBUFFER, 0);
-    mesa_gl.Flush();
-    int fence_fd = fence_export(&mesa_egl, &mesa_gl, d->mesa_dpy);
+    int fence_fd = blit_to_slot(s, slot);
     restore_gl(saved);
 
     /* Vendor: wait for Mesa, blit AHB -> window, swap. */
@@ -877,7 +932,10 @@ EGLSurface eglCreateWindowSurface(EGLDisplay dpy, EGLConfig config,
     d->surfaces = s;
     s->is_window = 1;
     s->vk = vk;
-    SHIM_LOG("presentation backend: %s", vk ? "vulkan (CPU upload)" : "egl (AHB)");
+    s->vk_ahb = vk ? vk_present_ahb_available(vk) : 0;
+    SHIM_LOG("presentation backend: %s", vk
+                 ? (s->vk_ahb ? "vulkan (zero-copy AHB)" : "vulkan (CPU upload)")
+                 : "egl (AHB)");
     s->mesa_config = config;
     s->mesa_surface = mpb;
     s->vendor_window = vwin;
