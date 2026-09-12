@@ -57,11 +57,12 @@ class MainActivity : Activity() {
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             addView(text)
-            for (backend in listOf("egl", "vulkan")) {
+            for (backend in listOf("egl", "vulkan").plus(listOf("zink"))) {
                 addView(Button(this@MainActivity).apply {
                     this.text = "Copy ${backend.uppercase()} setting"
                     setOnClickListener {
-                        val value = "FCL_SHIM_RENDERER=$backend"
+                        val value = if (backend == "zink") "FCL_SHIM_GALLIUM=zink"
+                                    else "FCL_SHIM_RENDERER=$backend"
                         (getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
                             .setPrimaryClip(ClipData.newPlainText("FCL presentation", value))
                         Toast.makeText(this@MainActivity, "Copied. Paste into FCL custom environment.",

@@ -329,11 +329,26 @@ out:
 
 __attribute__((constructor))
 static void fcl_probe_init(void) {
-    setenv("GALLIUM_DRIVER", "freedreno", 0);
-    setenv("MESA_LOADER_DRIVER_OVERRIDE", "kgsl", 0);
-    setenv("FD_FORCE_KGSL", "1", 0);
-    /* Mesa 26.3: advertise KGSL dma-buf import/export caps. */
-    setenv("FD_KGSL_ENABLE_DMABUF", "1", 0);
+    const char *gallium = getenv("FCL_SHIM_GALLIUM");
+    if (gallium && strcmp(gallium, "zink") == 0) {
+        /* Render through zink (GL on the Vulkan driver) instead of the freedreno
+         * GL driver: on Adreno 8xx (A840) the freedreno GL path misrenders (chunk
+         * geometry cut open, sky stripes) while zink/Zink is clean.  Mirror FCL's
+         * built-in Zink bring-up: pick the zink DRI driver on the swrast platform
+         * so no DRM render node is required.  OVERWRITE=1 because FCL applies the
+         * plugin's pojavEnv after the user's environment. */
+        setenv("GALLIUM_DRIVER", "zink", 1);
+        setenv("MESA_LOADER_DRIVER_OVERRIDE", "zink", 1);
+        setenv("MESA_ANDROID_NO_KMS_SWRAST", "1", 1);
+        __android_log_print(ANDROID_LOG_INFO, "FCLProbe",
+                            "FCL_SHIM_GALLIUM=zink: rendering via zink (Vulkan)");
+    } else {
+        setenv("GALLIUM_DRIVER", "freedreno", 0);
+        setenv("MESA_LOADER_DRIVER_OVERRIDE", "kgsl", 0);
+        setenv("FD_FORCE_KGSL", "1", 0);
+        /* Mesa 26.3: advertise KGSL dma-buf import/export caps. */
+        setenv("FD_KGSL_ENABLE_DMABUF", "1", 0);
+    }
 
     const char *enabled = getenv("FCL_PROBE");
     if (enabled && enabled[0] == '0') return;

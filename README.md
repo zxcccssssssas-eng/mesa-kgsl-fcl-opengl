@@ -361,6 +361,30 @@ the stale frame instead of displaying a newly allocated, unrendered pbuffer.
 Logs: `adb logcat -s EGLShim VulkanShim`. Each window logs its selected backend,
 including fallback, so the actual presentation path can be verified.
 
+## Zink rendering mode (workaround for the freedreno GL misrender on A8xx)
+
+On the Adreno 840 the freedreno **GL** driver misrenders (chunk geometry cut open
+with sky showing through, sky stripes, flicker).  Verified with the same game,
+same Mesa EGL/desktop-GL setup and same device:
+
+| renderer | result |
+|---|---|
+| freedreno GL (KGSL) | artefacts |
+| zink (Mesa GL on the Vulkan driver) | clean |
+| vendor GLES (MobileGlues/ANGLE) | clean |
+
+Set **`FCL_SHIM_GALLIUM=zink`** in FCL's custom environment to make the plugin
+render through zink while keeping the shim's zero-copy AHB presentation.  The
+constructor mirrors FCL's built-in Zink bring-up:
+
+```c
+setenv("GALLIUM_DRIVER", "zink", 1);
+setenv("MESA_LOADER_DRIVER_OVERRIDE", "zink", 1);
+setenv("MESA_ANDROID_NO_KMS_SWRAST", "1", 1);   /* no DRM render node needed */
+```
+
+Unset (or any other value) keeps the default freedreno/KGSL driver.
+
 ## Mesa version (26.3.0-devel)
 
 `scripts/build-mesa-android.sh` builds **Mesa 26.3.0-devel**
