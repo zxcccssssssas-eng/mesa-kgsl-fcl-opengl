@@ -495,7 +495,7 @@ static int ring_create(struct shim_surface *s)
             SHIM_ERR("ring: incomplete Mesa framebuffer"); goto fail;
         }
         /* Vendor side: texture sampled by the presentation blit (EGL backend). */
-        if (!want_vendor) continue;
+        if (!want_vendor) goto check;
         if (!vendor_current) {
             if (!vendor_egl.MakeCurrent(d->vendor_dpy, d->vendor_scratch, d->vendor_scratch,
                                         d->vendor_ctx)) {
@@ -522,7 +522,6 @@ static int ring_create(struct shim_surface *s)
         if (vendor_gl.CheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
             SHIM_ERR("ring: incomplete vendor framebuffer"); goto fail;
         }
-        if (!want_vendor) goto check;
         if (!restore_mesa(d)) goto fail;
         vendor_current = 0;
         continue;
