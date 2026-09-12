@@ -28,7 +28,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  MESA_REF: ${{ github.event.inputs.mesa_ref || 'adreno-main' }}
+  MESA_REF: ${{ github.event.inputs.mesa_ref || 'mesa-26.3.0-devel-20260824' }}
   NDK_VERSION: "27.2.12479018"
 
 jobs:
