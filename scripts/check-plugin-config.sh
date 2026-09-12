@@ -24,6 +24,8 @@ check "libdrm meson flags are probed from meson_options.txt" \
   grep -q 'drm_has_option' "${ROOT}/scripts/build-mesa-android.sh"
 check "build script always resyncs the cached Mesa checkout" \
   grep -q 'always resync the checkout with MESA_REF' "${ROOT}/scripts/build-mesa-android.sh"
+check "build script allows kopper on Android for zink" \
+  grep -q 'patch_mesa_android_kopper' "${ROOT}/scripts/build-mesa-android.sh"
 check "build script verifies the packaged Mesa version" \
   grep -q 'verify_mesa_version' "${ROOT}/scripts/build-mesa-android.sh"
 check "default Mesa ref is 26.3.0-devel" \

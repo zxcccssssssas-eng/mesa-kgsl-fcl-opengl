@@ -542,6 +542,45 @@ verify_no_private_deps() {
   log "no private platform library dependencies in packaged DSOs"
 }
 
+# Mesa disables kopper on Android ("Kopper won't work on Android without extra
+# platform level support"), but FCL's renderer plugins rely on it: with zink the
+# droid window path cannot import gralloc buffers on this device (zink requires
+# VK_EXT_image_drm_format_modifier for dma-buf import, which the Adreno Vulkan
+# driver does not expose), so a kopper window surface (EGL over Vulkan WSI) is
+# the only zero-copy way to present a zink frame.  Allow kopper for zink on
+# Android too; the freedreno/KGSL path is unaffected because the condition still
+# requires driver_name == "zink".
+patch_mesa_android_kopper() {
+  local src="$1"
+  python3 - "$src" <<'PY'
+import pathlib, sys
+
+src = pathlib.Path(sys.argv[1])
+path = src / "src" / "egl" / "drivers" / "dri2" / "egl_dri2.c"
+text = path.read_text(encoding="utf-8")
+marker = "the only zero-copy way to present a zink frame"
+old = """   /* Kopper won't work on Android without extra platform level support. */
+   dri2_dpy->kopper = dri2_dpy->driver_name && !strcmp(dri2_dpy->driver_name, "zink") &&
+                      !debug_get_bool_option("LIBGL_KOPPER_DISABLE", false) && disp->Platform != _EGL_PLATFORM_ANDROID;"""
+new = """   /* Kopper won't work on Android without extra platform level support.
+    * FCL renderer plugins need it anyway: with zink the droid window path cannot
+    * import gralloc buffers on this device (zink needs
+    * VK_EXT_image_drm_format_modifier for dma-buf import), so a kopper window
+    * surface is the only zero-copy way to present a zink frame. */
+   dri2_dpy->kopper = dri2_dpy->driver_name && !strcmp(dri2_dpy->driver_name, "zink") &&
+                      !debug_get_bool_option("LIBGL_KOPPER_DISABLE", false) &&
+                      (disp->Platform != _EGL_PLATFORM_ANDROID ||
+                       debug_get_bool_option("FCL_ALLOW_KOPPER_ANDROID", true));"""
+if marker in text:
+    print("egl_dri2.c kopper already patched", file=sys.stderr)
+elif old in text:
+    path.write_text(text.replace(old, new, 1), encoding="utf-8")
+    print("patched egl_dri2.c (kopper allowed on Android for zink)", file=sys.stderr)
+else:
+    sys.exit("error: cannot patch egl_dri2.c kopper condition: unexpected upstream layout")
+PY
+}
+
 # Mesa 26's Android EGL platform only probes DRM render nodes
 # (droid_open_device -> _eglDeviceDrm). Qualcomm Android kernels expose the
 # GPU exclusively through the KGSL kernel driver (/dev/kgsl-3d0) and the only
@@ -716,6 +755,7 @@ build_mesa() {
   patch_mesa_android_kgsl "${src}"
   patch_mesa_android_desktopgl "${src}"
   patch_mesa_freedreno_kgsl_dmabuf "${src}"
+  patch_mesa_android_kopper "${src}"
   write_cross_file "${WORK}/android-mesa.ini" "${DRM_PREFIX}/lib/pkgconfig"
   export PKG_CONFIG_LIBDIR="${DRM_PREFIX}/lib/pkgconfig"
   export PKG_CONFIG_PATH="${DRM_PREFIX}/lib/pkgconfig"
