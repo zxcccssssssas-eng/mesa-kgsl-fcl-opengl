@@ -26,16 +26,77 @@
 #include <dlfcn.h>
 #include <libgen.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <string.h>
 #include <android/log.h>
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
+#include <GLES3/gl3.h>
 
 #define SHIM_LOG(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define SHIM_ERR(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
 static void *egl_handle;
 static __eglMustCastToProperFunctionPointerType (*egl_get_proc_address)(const char *);
+
+/* Flywheel's indirect backend uses gl_DrawID with a _flw_baseDraw uniform.
+ * Mesa Freedreno on A840 can drop geometry from multi-draw indirect calls.
+ * Submit those commands one at a time, matching Flywheel's own Intel fallback.
+ * The commands stay GPU-resident, so this avoids a per-draw GPU readback. */
+typedef void (*draw_elements_indirect_fn)(GLenum, GLenum, const void *);
+typedef void (*multi_draw_elements_indirect_fn)(GLenum, GLenum, const void *, GLsizei, GLsizei);
+typedef void (*get_uniform_uiv_fn)(GLuint, GLint, GLuint *);
+typedef void (*uniform_1ui_fn)(GLint, GLuint);
+typedef GLint (*get_uniform_location_fn)(GLuint, const GLchar *);
+typedef void (*get_integer_v_fn)(GLenum, GLint *);
+
+static void shim_multi_draw_elements_indirect(GLenum mode, GLenum type,
+                                              const void *indirect, GLsizei drawcount,
+                                              GLsizei stride)
+{
+    multi_draw_elements_indirect_fn multi_draw =
+        (multi_draw_elements_indirect_fn)egl_get_proc_address("glMultiDrawElementsIndirect");
+    draw_elements_indirect_fn draw =
+        (draw_elements_indirect_fn)egl_get_proc_address("glDrawElementsIndirect");
+    get_integer_v_fn get_integer =
+        (get_integer_v_fn)egl_get_proc_address("glGetIntegerv");
+    get_uniform_location_fn get_location =
+        (get_uniform_location_fn)egl_get_proc_address("glGetUniformLocation");
+    get_uniform_uiv_fn get_uniform =
+        (get_uniform_uiv_fn)egl_get_proc_address("glGetUniformuiv");
+    uniform_1ui_fn set_uniform =
+        (uniform_1ui_fn)egl_get_proc_address("glUniform1ui");
+
+    if (!multi_draw || !draw || !get_integer || !get_location ||
+        !get_uniform || !set_uniform || drawcount <= 0) {
+        if (multi_draw) multi_draw(mode, type, indirect, drawcount, stride);
+        return;
+    }
+
+    GLint program = 0;
+    get_integer(GL_CURRENT_PROGRAM, &program);
+    GLint base_draw_location = program > 0 ?
+        get_location((GLuint)program, "_flw_baseDraw") : -1;
+    if (base_draw_location < 0) {
+        multi_draw(mode, type, indirect, drawcount, stride);
+        return;
+    }
+
+    GLuint base_draw = 0;
+    get_uniform((GLuint)program, base_draw_location, &base_draw);
+    size_t command_stride = stride ? (size_t)stride : 5 * sizeof(GLuint);
+    uintptr_t command = (uintptr_t)indirect;
+    for (GLsizei i = 0; i < drawcount; ++i) {
+        set_uniform(base_draw_location, base_draw + (GLuint)i);
+        draw(mode, type, (const void *)(command + (size_t)i * command_stride));
+    }
+    set_uniform(base_draw_location, base_draw);
+    static int logged;
+    if (!logged) {
+        SHIM_LOG("Flywheel indirect compatibility active (%d draws)", drawcount);
+        logged = 1;
+    }
+}
 
 static void load_egl_get_proc_address(void)
 {
@@ -68,6 +129,8 @@ static void load_egl_get_proc_address(void)
 __eglMustCastToProperFunctionPointerType glXGetProcAddress(const unsigned char *procname)
 {
     load_egl_get_proc_address();
+    if (procname && strcmp((const char *)procname, "glMultiDrawElementsIndirect") == 0)
+        return (__eglMustCastToProperFunctionPointerType)shim_multi_draw_elements_indirect;
     return egl_get_proc_address ? egl_get_proc_address((const char *)procname) : NULL;
 }
 

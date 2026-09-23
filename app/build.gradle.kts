@@ -12,8 +12,8 @@ android {
         applicationId = "com.mio.plugin.renderer"
         minSdk = 29
         targetSdk = 34
-        versionCode = 18
-        versionName = "1.5.2"
+        versionCode = 19
+        versionName = "1.5.3"
         ndk {
             abiFilters += listOf("arm64-v8a")
         }

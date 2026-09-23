@@ -390,10 +390,16 @@ On the current 1.21.1 NeoForge profile with 99 mods, Zink on the system Adreno
 The EGL/Vulkan shim switch changes presentation only and does not restore
 missing Create blocks in that profile. Its previous Flywheel setting,
 `backend = "flywheel:batch"`, is not registered by Flywheel 1.0.6 and falls
-back to an automatic backend. Set `backend = "flywheel:instancing"` in
-`config/flywheel-client.toml` and restart the game. This keeps Flywheel enabled
-and restored the missing Create blocks on the tablet. Setting `flywheel:off`
-also restored the blocks, but disables Flywheel's rendering backend.
+back to an automatic backend. Explicit `flywheel:indirect` previously omitted
+some Create geometry on the Adreno 840. Since 1.5.3, the plugin submits
+Flywheel's multi-draw indirect commands individually, updating its
+`_flw_baseDraw` uniform for each command. This follows Flywheel's existing
+Intel compatibility path while leaving indirect commands on the GPU. Other
+programs continue using native multi-draw. Set
+`backend = "flywheel:indirect"` in `config/flywheel-client.toml` and restart
+the game to use this path. `flywheel:instancing` remains a working fallback
+on this tablet; `flywheel:off` also restored the blocks but disables
+Flywheel's rendering backend.
 
 ## Mesa version (26.3.0-devel)
 
