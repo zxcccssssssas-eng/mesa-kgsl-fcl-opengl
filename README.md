@@ -388,8 +388,12 @@ Unset (or any other value) keeps the default freedreno/KGSL driver.
 On the current 1.21.1 NeoForge profile with 99 mods, Zink on the system Adreno
 840 Vulkan driver crashes in Mesa's `begin_rendering` while resources load.
 The EGL/Vulkan shim switch changes presentation only and does not restore
-missing Create blocks in that profile. For Create-specific gaps, test Flywheel's
-`backend = "flywheel:off"` in `config/flywheel-client.toml` and restart the game.
+missing Create blocks in that profile. Its previous Flywheel setting,
+`backend = "flywheel:batch"`, is not registered by Flywheel 1.0.6 and falls
+back to an automatic backend. Set `backend = "flywheel:instancing"` in
+`config/flywheel-client.toml` and restart the game. This keeps Flywheel enabled
+and restored the missing Create blocks on the tablet. Setting `flywheel:off`
+also restored the blocks, but disables Flywheel's rendering backend.
 
 ## Mesa version (26.3.0-devel)
 
