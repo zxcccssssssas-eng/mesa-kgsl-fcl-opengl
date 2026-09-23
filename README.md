@@ -370,12 +370,12 @@ same Mesa EGL/desktop-GL setup and same device:
 | renderer | result |
 |---|---|
 | freedreno GL (KGSL) | artefacts |
-| zink (Mesa GL on the Vulkan driver) | clean |
+| zink (Mesa GL on the Vulkan driver) | clean in the earlier test; crashes during resource loading with the current 99-mod NeoForge profile |
 | vendor GLES (MobileGlues/ANGLE) | clean |
 
 Set **`FCL_SHIM_GALLIUM=zink`** in FCL's custom environment to make the plugin
-render through zink while keeping the shim's zero-copy AHB presentation.  The
-constructor mirrors FCL's built-in Zink bring-up:
+render through zink. In this mode Mesa owns the window surface; the AHB
+presenter is not used. The constructor mirrors FCL's built-in Zink bring-up:
 
 ```c
 setenv("GALLIUM_DRIVER", "zink", 1);
@@ -384,6 +384,12 @@ setenv("MESA_ANDROID_NO_KMS_SWRAST", "1", 1);   /* no DRM render node needed */
 ```
 
 Unset (or any other value) keeps the default freedreno/KGSL driver.
+
+On the current 1.21.1 NeoForge profile with 99 mods, Zink on the system Adreno
+840 Vulkan driver crashes in Mesa's `begin_rendering` while resources load.
+The EGL/Vulkan shim switch changes presentation only and does not restore
+missing Create blocks in that profile. For Create-specific gaps, test Flywheel's
+`backend = "flywheel:off"` in `config/flywheel-client.toml` and restart the game.
 
 ## Mesa version (26.3.0-devel)
 

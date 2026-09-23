@@ -332,8 +332,9 @@ static void fcl_probe_init(void) {
     const char *gallium = getenv("FCL_SHIM_GALLIUM");
     if (gallium && strcmp(gallium, "zink") == 0) {
         /* Render through zink (GL on the Vulkan driver) instead of the freedreno
-         * GL driver: on Adreno 8xx (A840) the freedreno GL path misrenders (chunk
-         * geometry cut open, sky stripes) while zink/Zink is clean.  Mirror FCL's
+         * GL driver: on Adreno 8xx (A840) the freedreno GL path can misrender
+         * chunk geometry. Zink has worked in a simpler scene, but may crash in
+         * heavily modded profiles. Mirror FCL's
          * built-in Zink bring-up: pick the zink DRI driver on the swrast platform
          * so no DRM render node is required.  OVERWRITE=1 because FCL applies the
          * plugin's pojavEnv after the user's environment. */
