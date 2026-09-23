@@ -68,7 +68,7 @@ static void shim_multi_draw_elements_indirect(GLenum mode, GLenum type,
         (uniform_1ui_fn)egl_get_proc_address("glUniform1ui");
 
     if (!multi_draw || !draw || !get_integer || !get_location ||
-        !get_uniform || !set_uniform || drawcount <= 0) {
+        !get_uniform || !set_uniform || drawcount <= 0 || stride < 0) {
         if (multi_draw) multi_draw(mode, type, indirect, drawcount, stride);
         return;
     }
@@ -129,9 +129,11 @@ static void load_egl_get_proc_address(void)
 __eglMustCastToProperFunctionPointerType glXGetProcAddress(const unsigned char *procname)
 {
     load_egl_get_proc_address();
+    if (!egl_get_proc_address)
+        return NULL;
     if (procname && strcmp((const char *)procname, "glMultiDrawElementsIndirect") == 0)
         return (__eglMustCastToProperFunctionPointerType)shim_multi_draw_elements_indirect;
-    return egl_get_proc_address ? egl_get_proc_address((const char *)procname) : NULL;
+    return egl_get_proc_address((const char *)procname);
 }
 
 __eglMustCastToProperFunctionPointerType glXGetProcAddressARB(const unsigned char *procname)
