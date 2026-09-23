@@ -72,7 +72,8 @@ jobs:
       - name: Download Android NDK
         run: |
           NDK_ZIP="android-ndk-r27c-linux.zip"
-          curl -L --retry 5 -o "/tmp/${NDK_ZIP}" \
+          curl --fail --location --http1.1 --retry 8 --retry-all-errors \
+            --retry-delay 5 --continue-at - -o "/tmp/${NDK_ZIP}" \
             "https://dl.google.com/android/repository/${NDK_ZIP}"
           unzip -q "/tmp/${NDK_ZIP}" -d "${HOME}"
           echo "NDK=${HOME}/android-ndk-r27c" >> "$GITHUB_ENV"
