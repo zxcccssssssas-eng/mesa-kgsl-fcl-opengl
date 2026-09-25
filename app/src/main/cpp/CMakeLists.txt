@@ -15,7 +15,7 @@ option(FCL_STUB_MESA_EGL "Build no-op Mesa EGL/GLES/gallium DSOs" ON)
 if(FCL_STUB_MESA_EGL)
     # Compile the real presenters in metadata CI too; do not package them
     # without a Mesa core. This catches native regressions in stub builds.
-    add_library(shim_compile_check OBJECT egl_shim.c vulkan_present.c)
+    add_library(shim_compile_check OBJECT egl_shim.c vulkan_present.c gles_shim.c)
     target_compile_options(shim_compile_check PRIVATE -Wall -Wextra -Werror)
     add_library(EGL_mesa SHARED egl_stub.c)
     target_compile_options(EGL_mesa PRIVATE -fvisibility=default -Wall)

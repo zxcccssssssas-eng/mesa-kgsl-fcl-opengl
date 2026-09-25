@@ -391,15 +391,22 @@ The EGL/Vulkan shim switch changes presentation only and does not restore
 missing Create blocks in that profile. Its previous Flywheel setting,
 `backend = "flywheel:batch"`, is not registered by Flywheel 1.0.6 and falls
 back to an automatic backend. Explicit `flywheel:indirect` previously omitted
-some Create geometry on the Adreno 840. Since 1.5.3, the plugin submits
-Flywheel's multi-draw indirect commands individually, updating its
-`_flw_baseDraw` uniform for each command. This follows Flywheel's existing
-Intel compatibility path while leaving indirect commands on the GPU. Other
-programs continue using native multi-draw. Set
+some Create geometry on the Adreno 840. Since 1.5.4, the plugin reads
+Flywheel's GPU-resident instance-index buffer as an instanced vertex attribute.
+This avoids the vertex shader SSBO lookup that caused moving Create geometry
+to disappear or flash. The plugin also submits Flywheel's multi-draw indirect
+commands individually and updates its `_flw_baseDraw` uniform for each command.
+Other programs continue using native multi-draw. Set
 `backend = "flywheel:indirect"` in `config/flywheel-client.toml` and restart
 the game to use this path. `flywheel:instancing` remains a working fallback
 on this tablet; `flywheel:off` also restored the blocks but disables
 Flywheel's rendering backend.
+
+On this tablet, the observed Flywheel index buffer was about 104 KiB, well
+below Mesa's 128 MiB shader-storage block limit. Its 16 MiB staging buffers
+are Flywheel's chosen allocation size, not a GPU limit. Flywheel's largest
+observed compute workgroup used 256 threads, below the GPU's 1024-thread
+limit. Increasing these sizes would not address the missing geometry.
 
 ## Mesa version (26.3.0-devel)
 
