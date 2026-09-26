@@ -1,501 +1,223 @@
-# Mesa Freedreno/KGSL renderer plugin for FoldCraftLauncher
+# FCL Freedreno KGSL
 
-This repository builds an **installable FoldCraftLauncher (FCL) renderer plugin APK**, not a Linux container Mesa tarball.
+An **installable FoldCraftLauncher (FCL) renderer plugin** for Minecraft Java on **Qualcomm Adreno** phones and tablets.
 
-Primary deliverable:
+Install the APK like a normal Android app. FoldCraftLauncher finds it automatically and lists **Freedreno KGSL** in its renderer menu. You do **not** unpack Mesa libraries by hand.
 
-- `FCL-FreedrenoKGSL-arm64.apk` — Android app plugin that FCL discovers via `meta-data fclPlugin=true`
+Current plugin version: **1.5.4**. Mesa inside the plugin is **26.3.0-devel**.
 
-Secondary:
+> This is an Android plugin, not a Linux container Mesa tarball. For Debian/Ubuntu/Fedora-style arm64 userspace, use [lfdevs/mesa-for-android-container](https://github.com/lfdevs/mesa-for-android-container) instead.
 
-- `turnip-freedreno-kgsl-adrenotools.zip` — AdrenoTools-style zip (`meta.json` + `libvulkan_freedreno.so`, `libraryName` field) for FCL **driver** import (Turnip / Zink companion)
+The previous technical README (build flags, Mesa patches, internals) is saved as [`README.md.bak`](README.md.bak).
 
-## Install in FoldCraftLauncher
+---
 
-1. Get the APK
-   - GitHub → **Actions** → **Build FCL Freedreno KGSL plugin** → **Run workflow**
-   - Wait for Mesa NDK + APK jobs (the native compile is long)
-   - Download artifact `fcl-freedreno-kgsl-apk`
-   - Use `FCL-FreedrenoKGSL-arm64.apk` (not `*-stub.apk`)
-2. Install the APK on the phone/tablet (sideload; allow unknown sources).
-3. **Force-stop / restart FoldCraftLauncher** so it rescans installed packages.
-   This is required after every plugin *update* too: FCL caches each plugin's
-   `nativeLibraryDir` + renderer string at process start, and Android gives the
-   APK a new `/data/app/~~.../lib/arm64` path on update. Updating the plugin
-   while FCL is running makes it dlopen the deleted old path
-   (`UnsatisfiedLinkError ... libGLESv2_mesa.so(error = null)`).
-4. Open FCL → version / renderer settings and select **Freedreno KGSL**.
-5. Launch the game.
+## Will this work on my device?
 
-FCL finds plugins by scanning installed apps for:
-
-| meta-data | this plugin |
+| You need | It will not work on |
 |---|---|
-| `fclPlugin` | `true` |
-| `renderer` | `FreedrenoKGSL:libGLESv2_mesa.so:libEGL_mesa.so` |
-| `des` | `Freedreno KGSL (Mesa EGL, Adreno)` |
-| `boatEnv` / `pojavEnv` | KGSL + Mesa EGL env (see below) |
+| Qualcomm **Adreno 6xx / 7xx / 8xx** | Mali, PowerVR, Samsung Xclipse, desktop GPUs |
+| Android **10+** (API 29+) | Older Android |
+| **64-bit ARM** (`arm64-v8a`) | 32-bit devices |
+| A device that exposes KGSL (`/dev/kgsl-3d0`) | Non-Android Linux / containers |
+| A current [FoldCraftLauncher](https://github.com/FCL-Team/FoldCraftLauncher) | FCL builds that predate renderer plugins |
+
+This driver reports the **real** OpenGL version your Adreno supports. It does **not** pretend to be desktop GL 4.6. That is safer for NeoForge, but some PC-only shader packs or mods may still fail.
+
+It is **native Mesa Freedreno over KGSL**, not GL4ES, Holy-GL4ES, MobileGlues, or LTW.
+
+---
+
+## Install
+
+You need two apps on the **same user profile**: FoldCraftLauncher, and this plugin.
+
+### 1. Get the APK
+
+There is no GitHub Release yet. Download a CI artifact:
+
+1. Open this repo on GitHub → **Actions**
+2. Open the workflow **Build FCL Freedreno KGSL plugin**
+3. Use a successful run on `main`, or click **Run workflow** (leave Mesa build enabled) and wait — the native compile is long
+4. Download the artifact **`fcl-freedreno-kgsl-apk`**
+5. Use **`FCL-FreedrenoKGSL-arm64.apk`**
+
+Skip `FCL-FreedrenoKGSL-stub.apk`. The stub only exists so pull-request CI can assemble an APK without compiling Mesa. It is **not** a working renderer.
+
+### 2. Install it on the device
+
+1. Copy the APK to the phone or tablet
+2. Open it and install (allow **Install unknown apps** for your file manager if Android asks)
+3. You should see **FCL Freedreno KGSL** in the app drawer. Opening it is optional; it only shows help and copy buttons for extra settings
+
+### 3. Restart FoldCraftLauncher
+
+**Force-stop FoldCraftLauncher, then open it again.** Do this after every install **and every plugin update**.
+
+FCL remembers the plugin’s library path when it starts. Android gives the app a new path on update. If FCL stays running, it tries to load the old (deleted) files and the game fails with `UnsatisfiedLinkError` / `libGLESv2_mesa.so`.
+
+Quick way with a computer:
+
+```bash
+adb shell am force-stop com.tungsten.fcl
+```
+
+Or use Android: Settings → Apps → FoldCraftLauncher → Force stop.
+
+### 4. Pick the renderer and play
+
+1. In FCL, open the instance → renderer / version settings
+2. Select **Freedreno KGSL**
+3. Launch the game
+
+If the name never appears: the APK is not installed for the same Android user/work profile as FCL, or FCL is too old. Update FCL from [FCL-Team/FoldCraftLauncher](https://github.com/FCL-Team/FoldCraftLauncher).
 
 Package id: `com.mio.plugin.renderer.freedreno.kgsl`
 
-If the renderer does not appear, the APK is not installed for the same user/profile as FCL, or FCL is older than the renderer-plugin mechanism. Update FCL from [FCL-Team/FoldCraftLauncher](https://github.com/FCL-Team/FoldCraftLauncher).
+---
 
-### Optional Turnip driver zip
+## Extra settings (optional)
 
-If the workflow produced `turnip-freedreno-kgsl-adrenotools.zip`:
+You do not need these for a first launch. Defaults already use Freedreno/KGSL OpenGL.
 
-1. In FCL, open **driver import** (AdrenoTools-compatible Vulkan driver).
-2. Import the zip. `libraryName` is `libvulkan_freedreno.so`.
-3. Keep the **renderer** plugin selected for OpenGL. The zip is only needed if you switch Gallium to Zink (`GALLIUM_DRIVER=zink`) and want Turnip instead of the system Vulkan driver.
+The plugin app has buttons that **copy** the lines below. Copying does nothing by itself: paste them into FCL’s **custom environment**, then fully restart the game.
 
-## Expected GPUs
+### Presentation (how frames reach the screen)
 
-| Works | Does not work |
+The game still renders OpenGL through Freedreno/KGSL. This only changes how the finished frame is shown.
+
+| Paste into FCL custom environment | What it does |
 |---|---|
-| Qualcomm **Adreno 6xx / 7xx / 8xx** (including A840-class chips that lfdevs Mesa supports) | Mali, PowerVR, Xclipse, desktop GPUs |
-| Android devices that expose **KGSL** (`/dev/kgsl-3d0`) | Non-Android Linux containers (use [lfdevs/mesa-for-android-container](https://github.com/lfdevs/mesa-for-android-container) for those) |
+| `FCL_SHIM_RENDERER=egl` | **Default.** Usually the right choice. |
+| `FCL_SHIM_RENDERER=vulkan` | Alternative presentation path. Useful to compare if EGL looks wrong. Falls back to EGL if Vulkan cannot start. |
 
-Architecture: **arm64-v8a only**. Mesa 26 Turnip needs Android API **29+** (the NDK compile uses `aarch64-linux-android29-clang`, matching Vera-Firefly). The plugin `minSdk` is 29.
+Unset or unrecognized values use EGL.
 
-## OpenGL version (honest)
+### Visual glitches on Adreno 8xx (including Adreno 840)
 
-This plugin **does not** force `MESA_GL_VERSION_OVERRIDE`. Mesa reports whatever Freedreno/KGSL actually exposes on your Adreno. That is safer for NeoForge / GLFW early display, which probes core profiles and fails hard if an override claims 4.6 while context creation cannot deliver it.
-
-If you still want an advertised version for a modpack, set FCL custom env yourself (`MESA_GL_VERSION_OVERRIDE=4.5` etc.). Expect gaps vs desktop GL 4.x on mobile GPUs.
-
-This plugin is **native Gallium Freedreno over KGSL**, not GL4ES / Holy-GL4ES / MobileGlues / LTW. Mesa 26 (lfdevs `adreno-main`) **removed OSMesa**, so the plugin talks to FCL the same way FCL's Mesa EGL path does: `libEGL_mesa.so` + `POJAV_RENDERER=opengles3_desktopgl` (desktop OpenGL via `EGL_OPENGL_API`).
-
-
-### `libcutils.so` / `libhardware.so` not found (fixed in 1.2.3)
-
-Symptom (FCL log + `logcat -s FCL`):
+If chunks look cut open, the sky stripes through world geometry, or the image flickers, try **Zink** (OpenGL on top of the device’s Vulkan driver):
 
 ```text
-GLFW: Failed to create window context!
-java.lang.UnsatisfiedLinkError: Failed to dynamically load library:
-  /data/app/~~.../com.mio.plugin.renderer.freedreno.kgsl-.../lib/arm64/libGLESv2_mesa.so(error = null)
-E/FCL: DLOPEN: loading .../libgallium_dri.so
-  (error = dlopen failed: library "libcutils.so" not found: needed by .../libgallium_dri.so in namespace clns-9)
+FCL_SHIM_GALLIUM=zink
 ```
 
-Root cause: Mesa built with `-Dandroid-stub=true` links its stub DSOs as
-`DT_NEEDED`. `libcutils.so` and `libhardware.so` are **private platform
-libraries**, and Android app processes (the JVM classloader namespace `clns-N`
-LWJGL dlopens the renderer from) can only resolve libraries listed in
-`/system/etc/public.libraries.txt`. `liblog`/`libnativewindow`/`libsync` are
-public, so they were fine; `libcutils`/`libhardware` are not, so the whole
-dlopen chain failed before Mesa could even initialize.
+Leave this unset to stay on Freedreno GL.
 
-Fix: `scripts/build-mesa-android.sh` now patches Mesa's
-`src/android_stub/meson.build` so the `cutils` and `hardware` stubs are linked
-**statically into** `libgallium_dri.so` / `libEGL_mesa.so` / `libvulkan_freedreno.so`
-(no `DT_NEEDED` left). The public stubs stay shared and resolve to the real
-system libraries. Mesa's `hw_get_module` stub now returns failure instead of
-`0` with an unset `*module`, so `u_gralloc` cleanly falls back to its generic
-gralloc implementation (RGB window buffers keep working; `lock_ycbcr`/YUV video
-paths are unavailable in the fallback).
+**Caveat:** on a 1.21.1 NeoForge profile with a large mod list, Zink has crashed while resources load. Vendor GLES renderers (MobileGlues / ANGLE) can look correct on the same device. Try Zink if Freedreno GL is unusable; go back if it crashes.
 
-The build also hard-fails if any packaged DSO still has a `DT_NEEDED` on
-`libcutils`/`libhardware`/`libutils`/`libbinder`/`libgui`, so this regression
-cannot ship again silently.
+### Create / Flywheel missing or flashing blocks
 
-### `eglInitialize_p() failed: 3001` (fixed in 1.2.4)
+On Adreno 840, some Create machinery can vanish or flash with Flywheel. Plugin **1.5.4+** includes a workaround for Flywheel’s **indirect** backend.
 
-After the `libcutils`/`libhardware` fix the libraries load, but Mesa still
-cannot create a display on Qualcomm Android devices:
+In the instance file `config/flywheel-client.toml`, set:
 
 ```text
-E/GLBridge: eglInitialize_p() failed: 3001        (EGL_NOT_INITIALIZED)
-E/GLBridge: eglChooseConfig_p() failed: 3001
-GLFW: Failed to create window context!
+backend = "flywheel:indirect"
 ```
 
-Root cause: Mesa 26's **Android EGL platform only probes DRM render nodes**
-(`droid_open_device()` → `_eglDeviceDrm`). Qualcomm Android kernels expose the
-GPU exclusively through KGSL (`/dev/kgsl-3d0`); the only DRM node present is the
-display's `msm_drm` node, which SELinux does not let app processes open. The
-wayland and surfaceless EGL platforms already have a KGSL fallback gated on
-`MESA_LOADER_DRIVER_OVERRIDE=kgsl`, but the Android platform does not.
+Then restart the game. If problems remain, `flywheel:instancing` is a working fallback. `flywheel:off` also restores blocks but turns Flywheel off.
 
-Fix: `scripts/build-mesa-android.sh` patches
-`src/egl/drivers/dri2/platform_android.c` to add the same fallback — when
-`droid_open_device()` finds nothing and `disp->Options.Kgsl` is set, it opens
-`/dev/kgsl-3d0`, selects the `kgsl` DRI driver and creates the screen, so
-`eglGetDisplay(EGL_DEFAULT_DISPLAY)` + Android window surfaces keep working.
+### NeoForge: “Failed to find a valid GLFW profile”
 
-### Desktop OpenGL API missing on Android (`EGL_BAD_PARAMETER`)
+1. Use plugin **1.1.0 or newer**
+2. In the instance `config/fml.toml`, set `earlyWindowControl=false`
+3. Force-stop FCL, relaunch, and select **Freedreno KGSL** again
+4. If it still fails, grab `latest.log` from the FCL instance
 
-After the KGSL fallback the display initializes, but Mesa still refuses desktop
-OpenGL on Android builds:
+### Advertise a higher OpenGL version (modpacks)
+
+Only if a pack **requires** it. In FCL custom environment, for example:
 
 ```text
-CLIENT_APIS: OpenGL_ES          (no OpenGL)
-eglBindAPI(EGL_OPENGL_API) -> EGL_FALSE, error 0x300C (EGL_BAD_PARAMETER)
-eglChooseConfig(EGL_OPENGL_BIT) -> 0 configs
+MESA_GL_VERSION_OVERRIDE=4.5
 ```
 
-Root cause: `src/egl/main/eglcurrent.h` gates the API on
-`#if HAVE_OPENGL && !DETECT_OS_ANDROID` — "OpenGL is not a valid/supported API
-on Android". Container Mesa builds (lfdevs) get desktop GL because they are
-compiled with a Linux toolchain (`DETECT_OS_ANDROID=0`); this NDK build targets
-Android, so the guard applies even though Mesa was configured with
-`-Dopengl=true` and `libGLESv2_mesa.so` exports the desktop GL entry points.
+Expect missing features versus a real desktop GPU. Do not set this unless you need it; a fake 4.6 is a common NeoForge crash.
 
-Fix: the build script patches `_eglIsApiValid()` to accept `EGL_OPENGL_API` on
-Android too. `st_api_query_versions()` then reports the desktop GL versions the
-Freedreno/KGSL screen supports, `disp->ClientAPIs` gains `EGL_OPENGL_BIT`, and
-FCL's `POJAV_RENDERER=opengles3_desktopgl` path can bind desktop GL and create
-a context (the requested `EGL_CONTEXT_CLIENT_VERSION=3` is only a minimum —
-Mesa creates the highest version the driver supports).
+---
 
-### Renderer does not appear / old renderer after updating the plugin
+## Optional: Turnip Vulkan zip
 
-FCL scans plugin packages once per process. After installing or updating this
-APK, force-stop FCL (`am force-stop com.tungsten.fcl`) before launching a game.
-Otherwise FCL keeps the previous plugin's `nativeLibraryDir` in memory and
-dlopens a directory Android already deleted.
+The same workflow may also produce `turnip-freedreno-kgsl-adrenotools.zip`. **Most people can ignore it.**
 
-### NeoForge: "Failed to find a valid GLFW profile"
+Import it in FCL only if you switched Gallium to Zink (`GALLIUM_DRIVER=zink` / `FCL_SHIM_GALLIUM=zink`) **and** you want Mesa’s Turnip Vulkan driver instead of the phone’s system Vulkan driver.
 
-1. Install plugin **1.1.0+** (pojavEnv now DLOPENs `libEGL_mesa.so`; no forced GL 4.6).
-2. In the instance `config/fml.toml`, set `earlyWindowControl=false` (NeoForged guidance for Early Lifecycle / GLFW).
-3. Force-stop FCL, relaunch, pick **Freedreno KGSL** again.
-4. If it still fails, paste the full FCL/latest.log (the earlier message had no log attached).
+1. In FCL, open **driver import** (AdrenoTools-compatible Vulkan driver)
+2. Import the zip (`libraryName` is `libvulkan_freedreno.so`)
+3. Keep the **Freedreno KGSL** renderer selected for OpenGL
 
-## Environment injected into FCL
+---
 
-Boat (`boatEnv`) and Pojav (`pojavEnv`) both pin KGSL Freedreno and Mesa 26's Android EGL/GLES libraries:
+## Troubleshooting
+
+Always **force-stop FCL** after installing or updating this plugin, then try again.
+
+| What you see | What to try |
+|---|---|
+| Renderer is missing from FCL | Confirm the APK is installed on the same user as FCL. Update FCL. Do not use the stub APK. |
+| Game fails right after a plugin update | Force-stop FCL so it picks up the new library path. |
+| `Failed to dynamically load library` / `libGLESv2_mesa.so` | Same as above, or you installed the stub APK. Need a full Mesa build (plugin **1.2.3+**). |
+| `eglInitialize` failed / GLFW cannot create a window | Use plugin **1.2.4+**. Confirm the device is Adreno + KGSL. |
+| `EGL_BAD_PARAMETER` / no desktop OpenGL | Use a current plugin (desktop GL on Android is patched in). |
+| NeoForge GLFW profile error | `earlyWindowControl=false` in `config/fml.toml`; see above. |
+| Cut-open chunks / sky stripes on Adreno 8xx | Try `FCL_SHIM_GALLIUM=zink`, or a vendor GLES renderer. |
+| Create blocks missing or flashing | Plugin **1.5.4+** and `backend = "flywheel:indirect"` (see above). |
+
+If you need logs from a computer:
+
+```bash
+adb logcat -s FCL EGLShim VulkanShim FCLProbe
+```
+
+---
+
+## What FCL actually loads
+
+FCL scans installed apps for plugin metadata. This one advertises:
+
+| Field | Value |
+|---|---|
+| `fclPlugin` | `true` |
+| Display name | `Freedreno KGSL (Mesa EGL, Adreno)` |
+| Renderer | `FreedrenoKGSL:libGLESv2_mesa.so:libEGL_mesa.so` |
+
+Boat and Pojav both pin KGSL Freedreno and Mesa’s Android EGL libraries. You do not need to set these yourself:
 
 ```text
 GALLIUM_DRIVER=freedreno
 MESA_LOADER_DRIVER_OVERRIDE=kgsl
 FD_FORCE_KGSL=1
+FD_KGSL_ENABLE_DMABUF=1
 LIBGL_ES=3
 DLOPEN=libfreedreno_kgsl_init.so,libgallium_dri.so,libEGL_mesa.so,libGLESv2_mesa.so
-POJAV_RENDERER=opengles3_desktopgl   # pojav; FCL binds EGL_OPENGL_API
+POJAV_RENDERER=opengles3_desktopgl
 ```
 
-Default path is **pure Gallium Freedreno over KGSL** (not Zink). `libfreedreno_kgsl_init.so` pins KGSL before Mesa creates a device. The renderer string is `FreedrenoKGSL:libGLESv2_mesa.so:libEGL_mesa.so`. FCL sets `POJAVEXEC_EGL` from the EGL library name.
+---
 
-The packaged DSOs only depend on public Android libraries
-(`liblog`, `libnativewindow`, `libsync`, `libz`, `libm`, `libdl`, `libc`) plus
-each other via `DT_RUNPATH=$ORIGIN`; the private `libcutils`/`libhardware`
-stubs are linked in statically (see the troubleshooting section above).
+## For developers
 
-The Turnip AdrenoTools zip is an optional separate artifact for people who want Vulkan/Zink later; this plugin itself does not switch you to Zink.
+Build, Mesa flags, patch notes, and architecture live in the original README: **[`README.md.bak`](README.md.bak)**.
 
-## Build
+**CI (recommended):** GitHub Actions → **Build FCL Freedreno KGSL plugin** → **Run workflow** with `build_mesa=true`. Pull requests assemble a **stub** APK on purpose.
 
-### CI (recommended)
-
-Actions workflow `.github/workflows/build.yml`:
-
-- `workflow_dispatch` is enabled. **Run workflow** with `build_mesa=true` (default) to compile Mesa with the NDK and produce a usable APK.
-- Pull requests assemble a **stub** APK (plugin metadata + placeholder `libEGL_mesa.so` / `libGLESv2_mesa.so` / `libgallium_dri.so`) so Gradle stays green without a 1 hour Mesa compile. The stub is **not** a working renderer.
-
-Dispatch inputs:
-
-| input | default | meaning |
-|---|---|---|
-| `mesa_ref` | `adreno-main` | [lfdevs/mesa-for-android-container](https://github.com/lfdevs/mesa-for-android-container) branch |
-| `build_mesa` | `true` | NDK Mesa + real `libEGL_mesa.so` (set `false` to reuse last `mesa-jniLibs` artifact for a fast APK-only rebuild) |
-| `build_vulkan` | `true` | Turnip ICD + AdrenoTools zip |
-
-### Local
-
-Need: Android SDK, NDK r27+, meson, ninja, pkg-config, python3-mako, git, zip.
-The Mesa NDK clang target is API **29** (`SDK_VER=29`).
+**Local (needs Android SDK, NDK r27+, meson, ninja, pkg-config, python3-mako, git, zip):**
 
 ```bash
 export NDK=/path/to/android-ndk-r27c
 export MESA_REF=adreno-main
-./scripts/build-mesa-android.sh          # writes app/src/main/jniLibs/arm64-v8a/libEGL_mesa.so …
-./gradlew :app:assembleRelease           # APK under app/build/outputs/apk/release/
+./scripts/build-mesa-android.sh
+./gradlew :app:assembleRelease
 ./scripts/check-plugin-config.sh app/build/outputs/apk/release/*.apk
 ```
 
-libdrm (generic static, NDK) meson flags — current upstream **removed**
-`freedreno` / `freedreno-kgsl`. The script probes `meson_options.txt` and only
-passes those if present. On libdrm 2.4.134 that is:
+Shim tests: [`tests/README.md`](tests/README.md).
 
-```text
--Ddefault_library=static
--Dintel=disabled -Dradeon=disabled -Damdgpu=disabled -Dnouveau=disabled
--Dvmwgfx=disabled -Domap=disabled -Dexynos=disabled -Dtegra=disabled
--Dvc4=disabled -Detnaviv=disabled
--Dcairo-tests=disabled -Dman-pages=disabled -Dvalgrind=disabled
--Dtests=false -Dinstall-test-programs=false -Dudev=false
-```
-
-KGSL is enabled in **Mesa**, not libdrm.
-
-Mesa meson flags for **lfdevs `adreno-main` / Mesa 26** (NDK, not the Linux
-container flags). The script probes `meson.options` and skips unknown names.
-`-Dosmesa=true` is **not** passed: that option does not exist on this tree
-(same error as GitHub Actions run 34319938380). Working `-D` set:
-
-```text
--Dbuildtype=release
--Dplatforms=android
--Dplatform-sdk-version=33
--Dandroid-stub=true
--Dandroid-strict=false
--Dandroid-libbacktrace=disabled
--Dandroid-libperfetto=disabled
--Dxlib-lease=disabled
--Degl=enabled
--Degl-native-platform=android
--Dgles2=enabled
--Dgles1=disabled
--Dopengl=true
--Dgbm=disabled
--Dglx=disabled
--Dllvm=disabled
--Dglvnd=disabled
--Dlibunwind=disabled
--Dmicrosoft-clc=disabled
--Dvalgrind=disabled
--Dintel-rt=disabled
--Dlmsensors=disabled
--Ddisplay-info=disabled
--Dgallium-va=disabled
--Dxmlconfig=disabled
--Dexpat=disabled
--Dgallium-drivers=zink,freedreno
--Dfreedreno-kmds=kgsl
--Dvulkan-drivers=freedreno
--Dtools=
--Degl-lib-suffix=_mesa
--Dgles-lib-suffix=_mesa
--Dunversion-libgallium=true
--Dallow-fallback-for=libdrm
--Dbuild-tests=false
--Dgallium-rusticl=false
-```
-
-That is [android-mesa-build](https://github.com/Vera-Firefly/android-mesa-build) (NDK android-stub, sdk 33, gallium zink+freedreno, kgsl) plus Mesa 26 Android EGL/GLES instead of OSMesa, lfdevs `-Dfreedreno-kmds=kgsl`, `_mesa` library suffixes (FCL Zink), and Turnip for the zip. `egl` / `gles2` are **feature** options (`enabled` / `disabled`), not booleans.
-
-If meson still reports `Unknown option`, the script drops that `-D` and retries.
-
-Libraries this Mesa generation installs (and the plugin packages):
-
-| DSO | role |
-|---|---|
-| `libEGL_mesa.so` | Mesa EGL (`egl-lib-suffix=_mesa`) |
-| `libGLESv2_mesa.so` | GLES2 entry library (`gles-lib-suffix=_mesa`) |
-| `libgallium_dri.so` | Gallium dri megadriver (Android unversions this) |
-| `libvulkan_freedreno.so` | Turnip (optional, AdrenoTools zip) |
-
-## Layout
-
-```text
-app/                         FCLRendererPlugin-style Android Gradle project
-  src/main/cpp/              KGSL env constructor + optional EGL/GLES stubs
-  src/main/jniLibs/arm64-v8a/  real Mesa .so from scripts/ (CI)
-scripts/build-mesa-android.sh  libdrm + Mesa NDK cross compile
-.github/workflows/build.yml    Mesa + release APK + AdrenoTools zip
-```
-
-## Why this is not the lfdevs tarball
-
-[lfdevs/mesa-for-android-container](https://github.com/lfdevs/mesa-for-android-container) builds Mesa for **Debian/Ubuntu/Fedora/… arm64 userspace** (`-Dplatforms=x11,wayland -Dglvnd=enabled -Dglx=dri`). FCL cannot dlopen those glibc binaries.
-
-FCL loads `.so` files from a plugin APK’s `nativeLibraryDir` using the **Boat/Pojav** class loaders. The working format is the FCL renderer plugin APK ([FCLRendererPlugin](https://github.com/ShirosakiMio/FCLRendererPlugin)), with Mesa built by the **Android NDK** like [android-mesa-build](https://github.com/Vera-Firefly/android-mesa-build).
-
-## Third party
+### Credits
 
 - Mesa 3D — MIT, [lfdevs fork](https://github.com/lfdevs/mesa-for-android-container) / [upstream](https://gitlab.freedesktop.org/mesa/mesa)
-- Plugin metadata layout — [ShirosakiMio/FCLRendererPlugin](https://github.com/ShirosakiMio/FCLRendererPlugin)
-- Android NDK Mesa flags — [Vera-Firefly/android-mesa-build](https://github.com/Vera-Firefly/android-mesa-build) (OSMesa era) + Mesa `docs/android.rst`
-- FCL EGL desktop-GL renderer ABI — built-in Zink (`libEGL_mesa.so`, `opengles3_desktopgl*`) in [FCL-Team/FoldCraftLauncher](https://github.com/FCL-Team/FoldCraftLauncher)
-- FoldCraftLauncher plugin scan — [FCL-Team/FoldCraftLauncher](https://github.com/FCL-Team/FoldCraftLauncher)
-- Driver plugin / Turnip APK format — [FCL-Team/FCLDriverPlugin](https://github.com/FCL-Team/FCLDriverPlugin)
-- AdrenoTools zip — `schemaVersion` / `libraryName` as used by K11MCH1 / whitebelyash Turnip packages
-- EGL zero-copy presentation design (AHardwareBuffer -> `eglGetNativeClientBufferANDROID` -> `eglCreateImageKHR` -> fullscreen blit + `EGL_ANDROID_native_fence_sync`) — [utkarshdalal/GameNative](https://github.com/utkarshdalal/GameNative) (`GPUImage` / `BlitConverter`)
-
-## Presentation switch (1.4.0)
-
-
-Set **one** of these in FCL's custom environment, then fully restart the game:
-
-| Setting | Presentation path |
-|---|---|
-| `FCL_SHIM_RENDERER=egl` | Default. Mesa pbuffer → shared AHardwareBuffer → vendor EGL/GLES window. |
-| `FCL_SHIM_RENDERER=vulkan` | Mesa pbuffer → shared AHardwareBuffer → imported `VkImage` → fullscreen triangle → Android swapchain (zero copy). Falls back to a synchronized CPU upload when the AHB import or the graphics pipeline is unavailable. |
-
-The plugin's launcher screen has buttons to copy these settings. Copying alone
-does not change FCL's environment. An unset or unrecognized value uses EGL.
-Both modes keep **Freedreno/KGSL OpenGL** for game rendering; this is not a
-Zink/Turnip driver switch. Vulkan uses the Android Vulkan loader.
-
-The supplied GameNative rendering report informed the separation of rendering
-from presentation, explicit synchronization, and format handling.
-
-Vulkan zero-copy details:
-
-* The AHB ring used by the EGL path is imported with
-  `VK_ANDROID_external_memory_android_hardware_buffer`
-  (`vkGetAndroidHardwareBufferPropertiesANDROID` + dedicated allocation) and
-  sampled by a fullscreen triangle, so no readback and no upload happen.
-* The producer's native fence is imported as a `SYNC_FD` semaphore
-  (`VK_KHR_external_semaphore_fd`) and waited on in the queue (GPU side).
-* The GL bottom-up orientation is flipped in the vertex shader; a push constant
-  swaps R/B only when the swapchain is B8G8R8A8.
-* Two frames in flight, one submission per frame, FIFO presentation. A swapchain
-  reported as SUBOPTIMAL is rebuilt only when the condition persists (never per
-  frame).
-* If the import, pipeline or the first submission fails, the surface falls back
-  to the CPU upload path (GL_BGRA readback + staging copy) and keeps presenting.
-
-Vulkan negotiates an advertised RGBA8/BGRA8 UNORM surface format, corrects row
-orientation and BGRA byte order, and rebuilds an out-of-date swapchain. If initial
-Vulkan setup fails, the shim releases its native window resources and tries EGL.
-A runtime failure returns an EGL error; restart with `egl` to recover. Vulkan
-currently keeps FIFO even if the game requests a different swap interval.
-
-Rendering fixes include native-fence export with completion fallback, preservation
-of the game's framebuffer/texture/scissor/sRGB and pixel-pack state, framebuffer
-completeness checks, and cleanup of partially initialized AHB rings. Resize drops
-the stale frame instead of displaying a newly allocated, unrendered pbuffer.
-
-Logs: `adb logcat -s EGLShim VulkanShim`. Each window logs its selected backend,
-including fallback, so the actual presentation path can be verified.
-
-## Zink rendering mode (workaround for the freedreno GL misrender on A8xx)
-
-On the Adreno 840 the freedreno **GL** driver misrenders (chunk geometry cut open
-with sky showing through, sky stripes, flicker).  Verified with the same game,
-same Mesa EGL/desktop-GL setup and same device:
-
-| renderer | result |
-|---|---|
-| freedreno GL (KGSL) | artefacts |
-| zink (Mesa GL on the Vulkan driver) | clean in the earlier test; crashes during resource loading with the current 99-mod NeoForge profile |
-| vendor GLES (MobileGlues/ANGLE) | clean |
-
-Set **`FCL_SHIM_GALLIUM=zink`** in FCL's custom environment to make the plugin
-render through zink. In this mode Mesa owns the window surface; the AHB
-presenter is not used. The constructor mirrors FCL's built-in Zink bring-up:
-
-```c
-setenv("GALLIUM_DRIVER", "zink", 1);
-setenv("MESA_LOADER_DRIVER_OVERRIDE", "zink", 1);
-setenv("MESA_ANDROID_NO_KMS_SWRAST", "1", 1);   /* no DRM render node needed */
-```
-
-Unset (or any other value) keeps the default freedreno/KGSL driver.
-
-On the current 1.21.1 NeoForge profile with 99 mods, Zink on the system Adreno
-840 Vulkan driver crashes in Mesa's `begin_rendering` while resources load.
-The EGL/Vulkan shim switch changes presentation only and does not restore
-missing Create blocks in that profile. Its previous Flywheel setting,
-`backend = "flywheel:batch"`, is not registered by Flywheel 1.0.6 and falls
-back to an automatic backend. Explicit `flywheel:indirect` previously omitted
-some Create geometry on the Adreno 840. Since 1.5.4, the plugin reads
-Flywheel's GPU-resident instance-index buffer as an instanced vertex attribute.
-This avoids the vertex shader SSBO lookup that caused moving Create geometry
-to disappear or flash. The plugin also submits Flywheel's multi-draw indirect
-commands individually and updates its `_flw_baseDraw` uniform for each command.
-Other programs continue using native multi-draw. Set
-`backend = "flywheel:indirect"` in `config/flywheel-client.toml` and restart
-the game to use this path. `flywheel:instancing` remains a working fallback
-on this tablet; `flywheel:off` also restored the blocks but disables
-Flywheel's rendering backend.
-
-On this tablet, the observed Flywheel index buffer was about 104 KiB, well
-below Mesa's 128 MiB shader-storage block limit. Its 16 MiB staging buffers
-are Flywheel's chosen allocation size, not a GPU limit. Flywheel's largest
-observed compute workgroup used 256 threads, below the GPU's 1024-thread
-limit. Increasing these sizes would not address the missing geometry.
-
-## Mesa version (26.3.0-devel)
-
-`scripts/build-mesa-android.sh` builds **Mesa 26.3.0-devel**
-(`lfdevs/mesa-for-android-container` tag `mesa-26.3.0-devel-20260824`).
-
-Mesa 26.3 gates the KGSL dma-buf caps behind an option
-(`fd_kgsl_dmabuf_enabled()` → `FD_KGSL_ENABLE_DMABUF` / `XWAYLAND_FORCE_KGSL_SURFACELESS`),
-so the plugin sets **`FD_KGSL_ENABLE_DMABUF=1`** in `boatEnv`, `pojavEnv` and in
-`libfreedreno_kgsl_init.so`'s constructor. Without it the KGSL screen advertises
-no `DRM_PRIME_CAP_IMPORT` and every window/AHB import fails (the failure mode
-26.1 needed a local patch for).
-
-Patch status on 26.3.0:
-
-| Patch | 26.3.0 |
-|---|---|
-| android_stub: link private stubs statically (26.3 dropped the libcutils stub) | applied |
-| android EGL: KGSL fallback when no DRM render node is usable | applied |
-| eglcurrent: allow EGL_OPENGL_API on Android | applied |
-| freedreno: KGSL dma-buf caps | **upstream already has it** (env-gated, see above) |
-
-## EGL presentation shim
-
-`libEGL_mesa.so` in this plugin is a small presentation shim, not Mesa itself.
-Mesa's real EGL is shipped next to it as `libEGL_mesa_core.so`
-(`scripts/build-mesa-android.sh` renames it while packaging).
-
-Why: the freedreno/KGSL driver cannot own the Android window buffer on this
-device.  The window path goes through `u_gralloc`'s fallback backend (no
-IMapper5), and on the Adreno 840 the game ends up without a usable drawable
-(`eglMakeCurrent` -> `EGL_BAD_SURFACE`, "No context is current") and the JVM
-dies from heap corruption at the 60 s monitor-deflation handshake.  A
-controlled EGL+KGSL pbuffer test renders 100k frames with zero corruption, so
-the shim keeps Mesa off the window entirely:
-
-```text
-game GL -> Mesa context on a pbuffer          (freedreno/kgsl, stable)
-eglSwapBuffers
-  -> glBlitFramebuffer: pbuffer FBO0 -> AHardwareBuffer (R8G8B8A8, linear)
-  -> EGL_SYNC_NATIVE_FENCE_ANDROID + flush + eglDupNativeFenceFDANDROID
-  -> vendor GLES: AHB -> eglGetNativeClientBufferANDROID -> EGLImage ->
-     texture -> glBlitFramebuffer -> vendor window surface
-  -> vendor eglSwapBuffers (vendor gralloc owns the window buffer)
-```
-
-Two AHB slots rotate; the vendor's release fence is waited before Mesa reuses
-a slot. If fence export is unavailable, the producer completes its blit with
-`glFinish` before handing the buffer to the consumer.  The design follows
-GameNative's `GPUImage` / `BlitConverter` (AHB -> EGLImage zero-copy +
-native-fence sync); see "Third party" below.
-
-`libGLESv2_mesa.so` in this plugin is a second tiny shim. Mesa's Android build
-links the GL dispatch into libEGL and libGLESv2 separately (glvnd disabled, no
-shared libglapi), so a context made current through libEGL is invisible to the
-entry points exported by libGLESv2. LWJGL resolves GL functions with
-`glXGetProcAddress()` from the loaded GL library first and `dlsym()` second;
-Mesa's libGLESv2 exports neither `glXGetProcAddress` nor the desktop-only entry
-points, so the game ended up with libGLESv2's own stubs and every GL call threw
-`No context is current`. The shim exports `glXGetProcAddress` /
-`glXGetProcAddressARB` / `OSMesaGetProcAddress` forwarding to
-`libEGL_mesa_core.so`'s `eglGetProcAddress()`, so the game's entry points come
-from the same library the EGL shim uses for `eglMakeCurrent` (matching dispatch
-state) and the desktop GL API becomes available.
-
-Validated on the Adreno 840 device: the game reaches the menu and enters a
-world (screenshot non-black), the 60 s JVM SIGSEGV is gone, and the EGL shim's
-AHB ring presents every frame through the vendor GLES.
-
-Build prerequisites (validated on device by `FCLProbe`):
-
-- Mesa must advertise `DRM_PRIME_CAP_IMPORT` for the KGSL screen
-  (`fd_get_features() & FD_FEATURE_IMPORT_DMABUF`), otherwise
-  `eglCreateImageKHR(EGL_NATIVE_BUFFER_ANDROID)` returns NULL for both the
-  window and the AHB.  Patched in `fd_init_screen_caps()`.
-- The AHB must be imported into Mesa through the platform
-  `ANativeWindowBuffer` returned by the vendor's
-  `eglGetNativeClientBufferANDROID()`, not a hand-built struct: Mesa calls
-  `ANativeWindowBuffer_getHardwareBuffer()`/`AHardwareBuffer_acquire()` on it.
-- The vendor driver accepts the AHB as an `EGLImage`
-  (`EGL_ANDROID_get_native_client_buffer` + `EGL_KHR_image_base`).
-
-## FCLProbe diagnostic
-
-`libfreedreno_kgsl_init.so` runs a one-shot diagnostic in its constructor
-(logcat tag `FCLProbe`, opt-out with `FCL_PROBE=0`): it allocates a small
-`AHardwareBuffer`, creates a vendor EGL display and checks whether the vendor
-driver accepts it as an `EGLImage` (`eglGetNativeClientBufferANDROID` +
-`eglCreateImageKHR`). That is the zero-copy path the planned EGL presentation
-shim needs; the probe result decides whether the shim can use it or has to
-fall back to a PBO readback. It only logs, never aborts, and leaves the
-process-wide EGL display initialized for FCL.
+- Plugin layout — [ShirosakiMio/FCLRendererPlugin](https://github.com/ShirosakiMio/FCLRendererPlugin)
+- Android NDK Mesa flags — [Vera-Firefly/android-mesa-build](https://github.com/Vera-Firefly/android-mesa-build)
+- FoldCraftLauncher — [FCL-Team/FoldCraftLauncher](https://github.com/FCL-Team/FoldCraftLauncher)
+- Driver / Turnip packaging — [FCL-Team/FCLDriverPlugin](https://github.com/FCL-Team/FCLDriverPlugin), AdrenoTools zip conventions
+- EGL presentation design — [utkarshdalal/GameNative](https://github.com/utkarshdalal/GameNative)
