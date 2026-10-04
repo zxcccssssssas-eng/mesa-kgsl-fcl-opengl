@@ -50,7 +50,9 @@ check "extractNativeLibs is true" grep -q 'android:extractNativeLibs="true"' "${
 
 check "applicationIdSuffix is .freedreno.kgsl" grep -q 'applicationIdSuffix = ".freedreno.kgsl"' "${gradle}"
 check "plugin minSdk is 29" grep -q 'minSdk = 29' "${gradle}"
-check "renderer id is FreedrenoKGSL EGL/GLES mesa" grep -q 'FreedrenoKGSL:libGLESv2_mesa.so:/libEGL_mesa.so' "${gradle}"
+check "renderer id is FreedrenoKGSL EGL/GLES mesa" grep -q 'FreedrenoKGSL:libGLESv2_mesa.so:libEGL_mesa.so' "${gradle}"
+check "renderer EGL name has no leading slash" \
+  bash -c "! grep -q 'libGLESv2_mesa.so:/libEGL_mesa.so' '${gradle}'"
 check "GALLIUM_DRIVER=freedreno" grep -q '"GALLIUM_DRIVER" to "freedreno"' "${gradle}"
 check "MESA_LOADER_DRIVER_OVERRIDE=kgsl" grep -q '"MESA_LOADER_DRIVER_OVERRIDE" to "kgsl"' "${gradle}"
 check "POJAV_RENDERER=opengles3_desktopgl" grep -q '"POJAV_RENDERER" to "opengles3_desktopgl"' "${gradle}"
@@ -88,6 +90,18 @@ check "GLES entry-point shim source present" \
   test -f "${ROOT}/app/src/main/cpp/gles_shim.c"
 check "GLES shim exports glXGetProcAddress" \
   grep -q 'glXGetProcAddress' "${ROOT}/app/src/main/cpp/gles_shim.c"
+check "GLES shim forwards EGL to libEGL_mesa.so" \
+  grep -q 'libEGL_mesa.so' "${ROOT}/app/src/main/cpp/gles_shim.c"
+check "GLES shim exports eglGetDisplay" \
+  grep -q 'EGLDisplay eglGetDisplay' "${ROOT}/app/src/main/cpp/gles_shim.c"
+check "GLES shim exports eglChooseConfig" \
+  grep -q 'EGLBoolean eglChooseConfig' "${ROOT}/app/src/main/cpp/gles_shim.c"
+check "libEGL_mesa is not linked against libvulkan" \
+  bash -c "! grep -q 'target_link_libraries(EGL_mesa PRIVATE nativewindow log dl vulkan)' '${ROOT}/app/src/main/cpp/CMakeLists.txt'"
+check "vulkan presenter dlopens libvulkan.so locally" \
+  grep -Fq 'dlopen("libvulkan.so", RTLD_LOCAL | RTLD_NOW)' "${ROOT}/app/src/main/cpp/vulkan_present.c"
+check "GLES shim EGL forwarders" \
+  bash "${ROOT}/scripts/test-gles-egl-exports.sh"
 check "build script renames Mesa GLES for the shim" \
   grep -q 'libGLESv2_mesa_core.so' "${ROOT}/scripts/build-mesa-android.sh"
 check "build script enables EGL_OPENGL_API on Android" \

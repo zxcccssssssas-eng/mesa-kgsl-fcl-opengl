@@ -18,7 +18,8 @@
  * The real Mesa EGL is shipped next to this library as libEGL_mesa_core.so
  * (renamed by scripts/build-mesa-android.sh); the vendor EGL/GLES come from
  * /system/lib64.  FCL resolves all EGL entry points through eglGetProcAddress,
- * so the shim also re-exports them for that path.
+ * so the shim also re-exports them for that path. SDL dlsyms eglWaitGL and
+ * eglWaitNative as well; those forward to Mesa.
  */
 #define LOG_TAG "EGLShim"
 
@@ -83,6 +84,8 @@ struct egl_api {
     EGLBoolean (*ReleaseThread)(void);
     EGLint (*GetError)(void);
     __eglMustCastToProperFunctionPointerType (*GetProcAddress)(const char *);
+    EGLBoolean (*WaitGL)(void);
+    EGLBoolean (*WaitNative)(EGLint);
     /* extensions */
     EGLSyncKHR (*CreateSyncKHR)(EGLDisplay, EGLenum, const EGLint *);
     EGLBoolean (*DestroySyncKHR)(EGLDisplay, EGLSyncKHR);
@@ -162,6 +165,8 @@ static int load_egl_api(struct egl_api *api, const char *path, const char *fallb
     LOAD(GetProcAddress, "eglGetProcAddress");
 #undef LOAD
     api->ReleaseThread = (void *)dlsym(api->handle, "eglReleaseThread");
+    api->WaitGL = (void *)dlsym(api->handle, "eglWaitGL");
+    api->WaitNative = (void *)dlsym(api->handle, "eglWaitNative");
     /* optional extensions */
 #define LOAD_EXT(field, name) api->field = (void *)api->GetProcAddress(name)
     LOAD_EXT(CreateSyncKHR, "eglCreateSyncKHR");
@@ -1288,6 +1293,16 @@ EGLBoolean eglDestroyImageKHR(EGLDisplay dpy, EGLImageKHR image)
     return mesa_egl.DestroyImageKHR(d->mesa_dpy, image);
 }
 
+EGLBoolean eglWaitGL(void)
+{
+    return mesa_egl.WaitGL ? mesa_egl.WaitGL() : EGL_TRUE;
+}
+
+EGLBoolean eglWaitNative(EGLint engine)
+{
+    return mesa_egl.WaitNative ? mesa_egl.WaitNative(engine) : EGL_TRUE;
+}
+
 /* ------------------------------------------------------------------ */
 /* eglGetProcAddress dispatch                                         */
 /* ------------------------------------------------------------------ */
@@ -1321,6 +1336,8 @@ static const struct proc_entry shim_procs[] = {
     { "eglGetError", (void *)eglGetError },
     { "eglCreateImageKHR", (void *)eglCreateImageKHR },
     { "eglDestroyImageKHR", (void *)eglDestroyImageKHR },
+    { "eglWaitGL", (void *)eglWaitGL },
+    { "eglWaitNative", (void *)eglWaitNative },
 };
 
 __eglMustCastToProperFunctionPointerType eglGetProcAddress(const char *procname)

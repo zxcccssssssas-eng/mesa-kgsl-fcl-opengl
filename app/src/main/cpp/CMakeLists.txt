@@ -29,12 +29,14 @@ else()
     # Real Mesa DSOs are in jniLibs (libEGL_mesa_core.so / libGLESv2_mesa_core.so
     # hold the renamed Mesa libs). Ship our shims under the names FCL dlopens:
     #  - libEGL_mesa.so      presentation shim (Mesa offscreen -> vendor window)
-    #  - libGLESv2_mesa.so   GL entry-point shim (glXGetProcAddress -> Mesa EGL
-    #                        dispatch, so the game's GL state matches the EGL
-    #                        context the presentation shim makes current)
+    #  - libGLESv2_mesa.so   GL entry-point shim (glXGetProcAddress -> Mesa
+    #                        core dispatch). EGL symbols SDL dlsyms are
+    #                        forwarded to this presentation shim.
     add_library(EGL_mesa SHARED egl_shim.c vulkan_present.c)
     target_compile_options(EGL_mesa PRIVATE -fvisibility=default -Wall -Wextra)
-    target_link_libraries(EGL_mesa PRIVATE nativewindow log dl vulkan)
+    # Do not link libvulkan. DT_NEEDED would map system libvulkan into the
+    # default namespace and split vkGetInstanceProcAddr from FCL's Turnip.
+    target_link_libraries(EGL_mesa PRIVATE nativewindow log dl)
 
     add_library(GLESv2_mesa SHARED gles_shim.c)
     target_compile_options(GLESv2_mesa PRIVATE -fvisibility=default -Wall -Wextra)

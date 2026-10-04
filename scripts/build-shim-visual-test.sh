@@ -14,9 +14,10 @@ mkdir -p "${OUT}/lib/arm64-v8a" "${OUT}/classes" "${OUT}/dex"
 for lib in libEGL_mesa_core.so libgallium_dri.so; do
   cp "${LIBS}/${lib}" "${OUT}/lib/arm64-v8a/${lib}"
 done
+# No -lvulkan: this DSO dlopens libvulkan.so only if Vulkan presentation starts.
 "${CC}" -shared -fPIC -O2 -D_GNU_SOURCE -std=c11 -Wall -Wextra -Werror \
   "${ROOT}/app/src/main/cpp/egl_shim.c" "${ROOT}/app/src/main/cpp/vulkan_present.c" \
-  -o "${OUT}/lib/arm64-v8a/libEGL_mesa.so" -llog -ldl -lnativewindow -lvulkan \
+  -o "${OUT}/lib/arm64-v8a/libEGL_mesa.so" -llog -ldl -lnativewindow \
   -Wl,-z,max-page-size=16384 -Wl,--no-undefined -Wl,-soname,libEGL_mesa.so
 "${CC}" -shared -fPIC -O2 -D_GNU_SOURCE -std=c11 -Wall -Wextra -Werror \
   "${ROOT}/tests/android/visual_test.c" -o "${OUT}/lib/arm64-v8a/libvisualtest.so" \
