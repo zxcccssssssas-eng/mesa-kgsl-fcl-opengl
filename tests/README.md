@@ -4,6 +4,13 @@ The native regression test checks native-fence type and flushing, completion
 fallback when exporting a fence fails, invalid fence handling, framebuffer and
 pixel-pack state preservation, and GL-to-Vulkan vertical orientation.
 
+`scripts/test-gles-egl-exports.sh` builds the GLES shim with the host compiler
+and checks that the EGL entry points SDL dlsyms are real dynamic symbols
+forwarded to `libEGL_mesa.so`, while `glXGetProcAddress` still uses
+`libEGL_mesa_core.so` (including the Flywheel wrappers). It also compiles the
+Vulkan presenter without linking `libvulkan` and runs the native regression
+test.
+
 The separate Android visual test renders four color quadrants for 600 frames,
 with intentionally non-default framebuffer bindings, pixel-pack state, scissor,
 and framebuffer sRGB enabled at the presentation boundary. It checks GL errors

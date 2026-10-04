@@ -51,7 +51,9 @@ android {
             // Mesa 26 dropped OSMesa. Use Mesa Android EGL + GLES libs and
             // POJAV_RENDERER=opengles3_desktopgl so FCL binds EGL_OPENGL_API
             // (desktop GL) via the GL bridge — not OSMBridge.
-            manifestPlaceholders["renderer"] = "FreedrenoKGSL:libGLESv2_mesa.so:/libEGL_mesa.so"
+            // No leading slash: FCL joins this onto the plugin lib dir, and an
+            // absolute name becomes ".../arm64//libEGL_mesa.so".
+            manifestPlaceholders["renderer"] = "FreedrenoKGSL:libGLESv2_mesa.so:libEGL_mesa.so"
 
             // boatEnv / pojavEnv are KEY=val:KEY2=val2
             // DLOPEN=liba.so,libb.so loads extra native libs from this plugin APK.

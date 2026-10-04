@@ -71,6 +71,17 @@ int vk_present_frame(struct vk_present *p, const uint8_t *rgba, int w, int h)
     assert(!memcmp(rgba + 8, bottom_up, 8));
     return 1;
 }
+int vk_present_prefers_bgra(struct vk_present *p) { (void)p; return 0; }
+int vk_present_ahb_available(struct vk_present *p) { (void)p; return 0; }
+int vk_present_ahb_slot_wait(struct vk_present *p, AHardwareBuffer *ahb)
+{ (void)p; (void)ahb; return 1; }
+int vk_present_frame_ahb(struct vk_present *p, AHardwareBuffer *ahb, int fence_fd, int w, int h)
+{
+    (void)p; (void)ahb; (void)w; (void)h;
+    if (fence_fd >= 0) close(fence_fd);
+    return 0;
+}
+void vk_present_idle(struct vk_present *p) { (void)p; }
 int main(void)
 {
     (void)shim_init; /* Constructor deliberately disabled in this test. */
@@ -85,8 +96,9 @@ int main(void)
     api.CreateSyncKHR = NULL;
     assert(fence_export(&api, &gl, EGL_NO_DISPLAY) == -1 && finished == 2);
     int fds[2]; assert(pipe(fds) == 0); assert(write(fds[1], "x", 1) == 1);
-    assert(fence_wait(NULL, EGL_NO_DISPLAY, fds[0])); close(fds[1]);
-    assert(!fence_wait(NULL, EGL_NO_DISPLAY, fds[0])); /* Closed FD must fail. */
+    struct egl_api no_sync = {0}; /* No EGL sync entry points: poll the fence fd. */
+    assert(fence_wait(&no_sync, EGL_NO_DISPLAY, fds[0])); close(fds[1]);
+    assert(!fence_wait(&no_sync, EGL_NO_DISPLAY, fds[0])); /* Closed FD must fail. */
     mesa_gl = (struct gl_api){.GetIntegerv = get_integer, .IsEnabled = enabled,
         .Enable = enable, .Disable = disable, .BindFramebuffer = bind_fbo, .BindTexture = bind_tex,
         .BindBuffer = bind_buffer, .ReadBuffer = read_from, .PixelStorei = pixel_store, .ReadPixels = read_pixels};
