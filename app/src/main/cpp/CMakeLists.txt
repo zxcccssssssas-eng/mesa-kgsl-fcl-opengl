@@ -34,8 +34,8 @@ else()
     #                        forwarded to this presentation shim.
     add_library(EGL_mesa SHARED egl_shim.c vulkan_present.c)
     target_compile_options(EGL_mesa PRIVATE -fvisibility=default -Wall -Wextra)
-    # Do not link libvulkan. DT_NEEDED would map system libvulkan into the
-    # default namespace and split vkGetInstanceProcAddr from FCL's Turnip.
+    # The default EGL presenter does not need a Vulkan loader. Open the system
+    # loader only for the explicit Vulkan presenter; FCL owns the game's loader.
     target_link_libraries(EGL_mesa PRIVATE nativewindow log dl)
 
     add_library(GLESv2_mesa SHARED gles_shim.c)

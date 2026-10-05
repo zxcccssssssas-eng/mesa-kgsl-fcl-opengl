@@ -3,6 +3,7 @@
 #include "egl.h"
 typedef void *EGLImageKHR;
 #define EGL_NO_IMAGE_KHR ((EGLImageKHR)0)
+#define EGL_OPENGL_ES3_BIT_KHR 0x0040
 #define EGL_IMAGE_PRESERVED_KHR 0x30D2
 #define EGL_NATIVE_BUFFER_ANDROID 0x3140
 #define EGL_SYNC_FENCE_KHR 0x30F9

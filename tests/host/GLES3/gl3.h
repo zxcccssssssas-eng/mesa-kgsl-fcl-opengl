@@ -2,6 +2,7 @@
 #define GLES3_GL3_H
 #include <stdint.h>
 typedef unsigned int GLenum;
+typedef unsigned char GLubyte;
 typedef unsigned char GLboolean;
 typedef unsigned int GLbitfield;
 typedef int GLint;
