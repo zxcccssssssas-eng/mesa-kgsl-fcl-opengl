@@ -32,6 +32,20 @@ env:
   NDK_VERSION: "27.2.12479018"
 
 jobs:
+  shim-tests:
+    name: EGL loader and real Mesa context tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install host Mesa and Vulkan headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc libegl1-mesa-dev libgl1-mesa-dri libvulkan-dev
+      - name: Test exports, state and desktop/ES contexts
+        run: |
+          bash scripts/test-gles-egl-exports.sh
+          bash scripts/test-sdl-desktop-context.sh
+
   mesa-ndk:
     name: Mesa NDK (arm64 Freedreno KGSL)
     if: >

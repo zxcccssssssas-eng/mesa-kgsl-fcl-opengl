@@ -289,6 +289,7 @@ static __thread struct shim_surface *tls_read;
 
 static __thread EGLint shim_error = EGL_SUCCESS;
 static __thread EGLenum shim_api = EGL_OPENGL_ES_API;
+static int shim_sdl_desktop_gl;
 /* FCL_SHIM_GALLIUM=zink: render through zink and let Mesa present the window
  * itself (the droid window path FCL's built-in Zink uses); the AHB ring and the
  * vendor/Vulkan presenters stay unused because zink cannot import our AHBs on
@@ -936,6 +937,39 @@ EGLBoolean eglChooseConfig(EGLDisplay dpy, const EGLint *attrib_list, EGLConfig 
         set_error(EGL_BAD_DISPLAY);
         return EGL_FALSE;
     }
+    /* FCL normalizes SDL's desktop config request to ES2. Restore the API
+     * supported by this renderer before Mesa filters the configurations. */
+    EGLint desktop_attribs[128];
+    if (shim_sdl_desktop_gl) {
+        int i = 0, has_renderable_type = 0;
+        for (; attrib_list && attrib_list[i] != EGL_NONE; i += 2) {
+            if (i >= 126) {
+                set_error(EGL_BAD_ATTRIBUTE);
+                return EGL_FALSE;
+            }
+            EGLint attr = attrib_list[i], value = attrib_list[i + 1];
+            if (attr == EGL_RENDERABLE_TYPE) has_renderable_type = 1;
+            if ((attr == EGL_RENDERABLE_TYPE || attr == EGL_CONFORMANT) &&
+                value != EGL_DONT_CARE &&
+                (value & (EGL_OPENGL_ES_BIT | EGL_OPENGL_ES2_BIT | EGL_OPENGL_ES3_BIT_KHR))) {
+                value = (value & ~(EGL_OPENGL_ES_BIT | EGL_OPENGL_ES2_BIT |
+                                  EGL_OPENGL_ES3_BIT_KHR)) | EGL_OPENGL_BIT;
+            }
+            desktop_attribs[i] = attr;
+            desktop_attribs[i + 1] = value;
+        }
+        /* EGL's default RENDERABLE_TYPE is ES1, even after eglBindAPI(GL). */
+        if (!has_renderable_type) {
+            if (i >= 126) {
+                set_error(EGL_BAD_ATTRIBUTE);
+                return EGL_FALSE;
+            }
+            desktop_attribs[i++] = EGL_RENDERABLE_TYPE;
+            desktop_attribs[i++] = EGL_OPENGL_BIT;
+        }
+        desktop_attribs[i] = EGL_NONE;
+        attrib_list = desktop_attribs;
+    }
     return mesa_egl.ChooseConfig(d->mesa_dpy, attrib_list, configs, config_size, num_config);
 }
 
@@ -1252,6 +1286,8 @@ EGLDisplay eglGetCurrentDisplay(void)
 
 EGLBoolean eglBindAPI(EGLenum api)
 {
+    if (shim_sdl_desktop_gl && api == EGL_OPENGL_ES_API)
+        api = EGL_OPENGL_API;
     EGLBoolean ok = mesa_egl.BindAPI(api);
     if (ok) shim_api = api;
     return ok;
@@ -1359,6 +1395,16 @@ __eglMustCastToProperFunctionPointerType eglGetProcAddress(const char *procname)
 /* init                                                               */
 /* ------------------------------------------------------------------ */
 
+static int uses_sdl_desktop_gl(void)
+{
+    const char *renderer = getenv("POJAV_RENDERER");
+    const char *library = getenv("SDL_OPENGL_LIBRARY");
+    if (!renderer || strcmp(renderer, "opengles3_desktopgl") || !library)
+        return 0;
+    const char *leaf = strrchr(library, '/');
+    return !strcmp(leaf ? leaf + 1 : library, "libGLESv2_mesa.so");
+}
+
 #ifndef FCL_SHIM_TEST
 __attribute__((constructor))
 #endif
@@ -1368,9 +1414,15 @@ static void shim_init(void)
     const char *dir = self_dir();
     const char *gallium = getenv("FCL_SHIM_GALLIUM");
     shim_zink_mode = gallium && strcmp(gallium, "zink") == 0;
+    /* FCL forces SDL's profile to ES, including for this desktop-GL plugin.
+     * Native ES clients outside this selected renderer keep their API. */
+    shim_sdl_desktop_gl = uses_sdl_desktop_gl();
+    if (shim_sdl_desktop_gl)
+        SHIM_LOG("SDL desktop renderer: translating ES API/config requests to OpenGL");
 
-    snprintf(path, sizeof(path), "%s/libEGL_mesa_core.so", dir);
-    if (!load_egl_api(&mesa_egl, path, NULL)) {
+    int path_length = snprintf(path, sizeof(path), "%s/libEGL_mesa_core.so", dir);
+    if (path_length < 0 || (size_t)path_length >= sizeof(path) ||
+        !load_egl_api(&mesa_egl, path, NULL)) {
         if (!load_egl_api(&mesa_egl, "libEGL_mesa_core.so", NULL)) {
             SHIM_ERR("cannot load Mesa EGL core; shim disabled");
             return;

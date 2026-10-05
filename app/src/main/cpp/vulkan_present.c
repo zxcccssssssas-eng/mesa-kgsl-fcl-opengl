@@ -17,10 +17,10 @@
  * Both paths use FIFO presentation.  The zero-copy path keeps frame pacing
  * (this is the Android presentation queue, not the render loop).
  *
- * libvulkan is not a DT_NEEDED of this DSO. A link-time dependency maps
- * system libvulkan into the default namespace, so SDL and LWJGL no longer
- * share FCL's Turnip vkGetInstanceProcAddr. The loader is opened only when
- * this presenter starts.
+ * libvulkan is not a DT_NEEDED of this DSO. The default EGL presentation
+ * path does not need a Vulkan loader; open the system loader only when this
+ * presenter starts. FCL separately owns the game's SDL/LWJGL loader routing.
+ * This does not by itself make their vkGetInstanceProcAddr pointers equal.
  */
 #define VK_USE_PLATFORM_ANDROID_KHR
 #define VK_NO_PROTOTYPES

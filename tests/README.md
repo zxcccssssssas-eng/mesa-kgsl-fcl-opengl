@@ -1,5 +1,38 @@
 # Shim validation
 
+## SDL desktop OpenGL startup
+
+Run the loader/state tests and a real Mesa context test on Linux:
+
+```sh
+bash scripts/test-gles-egl-exports.sh
+bash scripts/test-sdl-desktop-context.sh
+```
+
+The second test requires the Mesa EGL runtime and software driver, development
+headers for Vulkan, and a C compiler. On Ubuntu these are provided by
+`gcc libegl1-mesa-dev libgl1-mesa-dri libvulkan-dev`. Set `HOST_EGL_LIBRARY` to an
+absolute `libEGL.so.1` path if the compiler cannot locate it.
+
+The test compiles both production shims and loads real Mesa through them. It
+replays FCL's forced ES API and ES2 config request, then requires an actual
+desktop OpenGL 4 context and a correct pixel readback through EGL/glX dispatch.
+Separate processes verify that native ES clients, another renderer, and a
+different SDL GL library still receive ES contexts. API version overrides are
+disabled. A pbuffer replaces the Android window; this tests context creation
+and GL dispatch, not Android presentation or Minecraft gameplay.
+
+The correction is enabled only when `POJAV_RENDERER=opengles3_desktopgl` and
+`SDL_OPENGL_LIBRARY` names this plugin's `libGLESv2_mesa.so`. FCL forces an ES
+profile even for this desktop renderer, so the shim restores desktop API and
+config selection. Context version attributes continue through to Mesa.
+
+Vulkan loader isolation is a separate check: the presenter has no static
+Vulkan imports/dependency and loads the system loader only when explicitly
+selected with `FCL_SHIM_RENDERER=vulkan`. This is not a fix for every
+`vkGetInstanceProcAddr mismatch`: FCL must route SDL and LWJGL to the same
+loader handle, including when using its private Turnip namespace.
+
 The native regression test checks native-fence type and flushing, completion
 fallback when exporting a fence fails, invalid fence handling, framebuffer and
 pixel-pack state preservation, and GL-to-Vulkan vertical orientation.

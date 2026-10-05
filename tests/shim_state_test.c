@@ -82,6 +82,89 @@ int vk_present_frame_ahb(struct vk_present *p, AHardwareBuffer *ahb, int fence_f
     return 0;
 }
 void vk_present_idle(struct vk_present *p) { (void)p; }
+
+static EGLenum bound_api;
+static int fail_bind, config_calls;
+static EGLint requested_type, requested_conformant, requested_depth;
+static EGLBoolean bind_api(EGLenum api)
+{
+    bound_api = api;
+    return fail_bind ? EGL_FALSE : EGL_TRUE;
+}
+static EGLBoolean choose_config(EGLDisplay d, const EGLint *attrs, EGLConfig *configs,
+                               EGLint size, EGLint *count)
+{
+    (void)d; (void)configs; (void)size; (void)count;
+    ++config_calls;
+    requested_type = EGL_OPENGL_ES_BIT; /* EGL default when omitted. */
+    requested_conformant = requested_depth = 0;
+    for (int i = 0; attrs && attrs[i] != EGL_NONE; i += 2) {
+        if (attrs[i] == EGL_RENDERABLE_TYPE) requested_type = attrs[i + 1];
+        if (attrs[i] == EGL_CONFORMANT) requested_conformant = attrs[i + 1];
+        if (attrs[i] == EGL_DEPTH_SIZE) requested_depth = attrs[i + 1];
+    }
+    return EGL_TRUE;
+}
+
+static void test_sdl_desktop_gl(void)
+{
+    unsetenv("POJAV_RENDERER");
+    unsetenv("SDL_OPENGL_LIBRARY");
+    assert(!uses_sdl_desktop_gl());
+    setenv("POJAV_RENDERER", "opengles3_desktopgl", 1);
+    assert(!uses_sdl_desktop_gl());
+    setenv("SDL_OPENGL_LIBRARY", "/plugin/libGLESv2_mesa.so.other", 1);
+    assert(!uses_sdl_desktop_gl());
+    setenv("SDL_OPENGL_LIBRARY", "/plugin/libGLESv2_mesa.so", 1);
+    assert(uses_sdl_desktop_gl());
+    setenv("SDL_OPENGL_LIBRARY", "libGLESv2_mesa.so", 1);
+    assert(uses_sdl_desktop_gl());
+    setenv("POJAV_RENDERER", "opengles3", 1);
+    assert(!uses_sdl_desktop_gl());
+
+    mesa_egl.BindAPI = bind_api;
+    mesa_egl.ChooseConfig = choose_config;
+    struct shim_display display = {0};
+    const EGLint attrs[] = {EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
+        EGL_CONFORMANT, EGL_OPENGL_ES3_BIT_KHR, EGL_DEPTH_SIZE, 24, EGL_NONE};
+    shim_sdl_desktop_gl = 0;
+    assert(eglBindAPI(EGL_OPENGL_ES_API) && bound_api == EGL_OPENGL_ES_API);
+    assert(eglChooseConfig(&display, attrs, NULL, 0, NULL));
+    assert(requested_type == EGL_OPENGL_ES2_BIT && requested_conformant == EGL_OPENGL_ES3_BIT_KHR);
+    shim_sdl_desktop_gl = 1;
+    assert(eglBindAPI(EGL_OPENGL_ES_API) && bound_api == EGL_OPENGL_API);
+    assert(shim_api == EGL_OPENGL_API);
+    assert(eglChooseConfig(&display, attrs, NULL, 0, NULL));
+    assert(requested_type == EGL_OPENGL_BIT && requested_conformant == EGL_OPENGL_BIT);
+    assert(requested_depth == 24 && attrs[1] == EGL_OPENGL_ES2_BIT);
+    const EGLint unrestricted[] = {EGL_RENDERABLE_TYPE, EGL_DONT_CARE,
+        EGL_CONFORMANT, 0, EGL_NONE};
+    assert(eglChooseConfig(&display, unrestricted, NULL, 0, NULL));
+    assert(requested_type == EGL_DONT_CARE && requested_conformant == 0);
+    const EGLint desktop[] = {EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT,
+        EGL_CONFORMANT, EGL_DONT_CARE, EGL_NONE};
+    assert(eglChooseConfig(&display, desktop, NULL, 0, NULL));
+    assert(requested_type == EGL_OPENGL_BIT && requested_conformant == EGL_DONT_CARE);
+    assert(eglChooseConfig(&display, NULL, NULL, 0, NULL));
+    assert(requested_type == EGL_OPENGL_BIT);
+    const EGLint depth_only[] = {EGL_DEPTH_SIZE, 16, EGL_NONE};
+    assert(eglChooseConfig(&display, depth_only, NULL, 0, NULL));
+    assert(requested_type == EGL_OPENGL_BIT && requested_depth == 16);
+    EGLint too_long[129];
+    for (int i = 0; i < 128; i += 2) {
+        too_long[i] = EGL_DEPTH_SIZE;
+        too_long[i + 1] = 24;
+    }
+    too_long[128] = EGL_NONE;
+    int previous_calls = config_calls;
+    assert(!eglChooseConfig(&display, too_long, NULL, 0, NULL));
+    assert(shim_error == EGL_BAD_ATTRIBUTE && config_calls == previous_calls);
+    assert(eglBindAPI(EGL_OPENGL_API) && bound_api == EGL_OPENGL_API);
+    fail_bind = 1;
+    assert(!eglBindAPI(0));
+    assert(bound_api == 0 && shim_api == EGL_OPENGL_API);
+}
+
 int main(void)
 {
     (void)shim_init; /* Constructor deliberately disabled in this test. */
@@ -108,6 +191,7 @@ int main(void)
     assert(read_fbo == 17 && draw_fbo == 23 && tex == 31 && scissor && srgb);
     assert(pack == 41 && alignment == 8 && length == 7 && rows == 2 && skip == 3 && read_buffer == GL_NONE);
     free(surface.pixels);
-    puts("PASS: native fences, completion fallback, invalid fences, GL state, pixel-pack state, vertical orientation");
+    test_sdl_desktop_gl();
+    puts("PASS: native fences, completion fallback, invalid fences, GL state, pixel-pack state, vertical orientation, SDL desktop API/config");
     return 0;
 }
