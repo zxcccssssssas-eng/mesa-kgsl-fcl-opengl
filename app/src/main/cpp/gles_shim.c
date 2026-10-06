@@ -20,6 +20,12 @@
  * shim uses for eglMakeCurrent, so the dispatch state matches, and the desktop
  * GL entry points (which the ES-only libGLESv2 does not export) become
  * available too.
+ *
+ * SDL 3 passes this library to SDL_EGL_LoadLibrary and dlsyms EGL entry
+ * points from it. FCL's SDL_LoadFunction hook returns a stand-in for
+ * eglChooseConfig when dlsym fails, so SDL never falls back to
+ * libEGL_mesa.so. The EGL symbols below forward to that presentation shim
+ * (not Mesa core) so window blit stays on the shim.
  */
 #define LOG_TAG "GLESShim"
 
@@ -307,4 +313,281 @@ __eglMustCastToProperFunctionPointerType glXGetProcAddressARB(const unsigned cha
 __eglMustCastToProperFunctionPointerType OSMesaGetProcAddress(const char *procname)
 {
     return glXGetProcAddress((const unsigned char *)procname);
+}
+
+/* SDL dlsyms these from the GL library. Forward them to libEGL_mesa.so. */
+static void *present_handle;
+static int present_state; /* 0 untried, 1 ready, -1 failed */
+static struct {
+    EGLDisplay (*GetDisplay)(EGLNativeDisplayType);
+    EGLBoolean (*Initialize)(EGLDisplay, EGLint *, EGLint *);
+    EGLBoolean (*Terminate)(EGLDisplay);
+    __eglMustCastToProperFunctionPointerType (*GetProcAddress)(const char *);
+    EGLBoolean (*ChooseConfig)(EGLDisplay, const EGLint *, EGLConfig *, EGLint, EGLint *);
+    EGLContext (*CreateContext)(EGLDisplay, EGLConfig, EGLContext, const EGLint *);
+    EGLBoolean (*DestroyContext)(EGLDisplay, EGLContext);
+    EGLSurface (*CreatePbufferSurface)(EGLDisplay, EGLConfig, const EGLint *);
+    EGLSurface (*CreateWindowSurface)(EGLDisplay, EGLConfig, EGLNativeWindowType, const EGLint *);
+    EGLBoolean (*DestroySurface)(EGLDisplay, EGLSurface);
+    EGLBoolean (*MakeCurrent)(EGLDisplay, EGLSurface, EGLSurface, EGLContext);
+    EGLBoolean (*SwapBuffers)(EGLDisplay, EGLSurface);
+    EGLBoolean (*SwapInterval)(EGLDisplay, EGLint);
+    const char *(*QueryString)(EGLDisplay, EGLint);
+    EGLBoolean (*GetConfigAttrib)(EGLDisplay, EGLConfig, EGLint, EGLint *);
+    EGLBoolean (*WaitNative)(EGLint);
+    EGLBoolean (*WaitGL)(void);
+    EGLBoolean (*BindAPI)(EGLenum);
+    EGLint (*GetError)(void);
+    EGLImageKHR (*CreateImageKHR)(EGLDisplay, EGLContext, EGLenum, EGLClientBuffer, const EGLint *);
+    EGLBoolean (*DestroyImageKHR)(EGLDisplay, EGLImageKHR);
+    EGLBoolean (*ReleaseThread)(void);
+    EGLContext (*GetCurrentContext)(void);
+    EGLSurface (*GetCurrentSurface)(EGLint);
+    EGLDisplay (*GetCurrentDisplay)(void);
+} present;
+
+static int load_present_egl(void)
+{
+    void *handle = NULL;
+    if (present_state == 1)
+        return 1;
+    if (present_state < 0)
+        return 0;
+
+    Dl_info info;
+    if (dladdr((void *)&load_present_egl, &info) && info.dli_fname) {
+        char tmp[4096], path[4096];
+        snprintf(tmp, sizeof(tmp), "%s", info.dli_fname);
+        snprintf(path, sizeof(path), "%s/libEGL_mesa.so", dirname(tmp));
+        handle = dlopen(path, RTLD_LOCAL | RTLD_LAZY);
+    }
+    if (!handle)
+        handle = dlopen("libEGL_mesa.so", RTLD_LOCAL | RTLD_LAZY);
+    if (!handle) {
+        SHIM_ERR("cannot load libEGL_mesa.so: %s", dlerror());
+        present_state = -1;
+        return 0;
+    }
+#define REQ(field, name) \
+    do { \
+        present.field = (void *)dlsym(handle, name); \
+        if (!present.field) { \
+            SHIM_ERR("libEGL_mesa.so missing %s", name); \
+            memset(&present, 0, sizeof(present)); \
+            dlclose(handle); \
+            present_state = -1; \
+            return 0; \
+        } \
+    } while (0)
+    REQ(GetDisplay, "eglGetDisplay");
+    REQ(Initialize, "eglInitialize");
+    REQ(Terminate, "eglTerminate");
+    REQ(GetProcAddress, "eglGetProcAddress");
+    REQ(ChooseConfig, "eglChooseConfig");
+    REQ(CreateContext, "eglCreateContext");
+    REQ(DestroyContext, "eglDestroyContext");
+    REQ(CreatePbufferSurface, "eglCreatePbufferSurface");
+    REQ(CreateWindowSurface, "eglCreateWindowSurface");
+    REQ(DestroySurface, "eglDestroySurface");
+    REQ(MakeCurrent, "eglMakeCurrent");
+    REQ(SwapBuffers, "eglSwapBuffers");
+    REQ(SwapInterval, "eglSwapInterval");
+    REQ(QueryString, "eglQueryString");
+    REQ(GetConfigAttrib, "eglGetConfigAttrib");
+    REQ(WaitNative, "eglWaitNative");
+    REQ(WaitGL, "eglWaitGL");
+    REQ(BindAPI, "eglBindAPI");
+    REQ(GetError, "eglGetError");
+#undef REQ
+#define OPT(field, name) present.field = (void *)dlsym(handle, name)
+    OPT(CreateImageKHR, "eglCreateImageKHR");
+    OPT(DestroyImageKHR, "eglDestroyImageKHR");
+    OPT(ReleaseThread, "eglReleaseThread");
+    OPT(GetCurrentContext, "eglGetCurrentContext");
+    OPT(GetCurrentSurface, "eglGetCurrentSurface");
+    OPT(GetCurrentDisplay, "eglGetCurrentDisplay");
+#undef OPT
+    present_handle = handle;
+    present_state = 1;
+    SHIM_LOG("EGL entry points forwarded to libEGL_mesa.so");
+    return 1;
+}
+
+EGLDisplay eglGetDisplay(EGLNativeDisplayType display_id)
+{
+    if (!load_present_egl())
+        return EGL_NO_DISPLAY;
+    return present.GetDisplay(display_id);
+}
+
+EGLBoolean eglInitialize(EGLDisplay dpy, EGLint *major, EGLint *minor)
+{
+    if (!load_present_egl())
+        return EGL_FALSE;
+    return present.Initialize(dpy, major, minor);
+}
+
+EGLBoolean eglTerminate(EGLDisplay dpy)
+{
+    if (!load_present_egl())
+        return EGL_FALSE;
+    return present.Terminate(dpy);
+}
+
+__eglMustCastToProperFunctionPointerType eglGetProcAddress(const char *procname)
+{
+    if (!load_present_egl())
+        return NULL;
+    return present.GetProcAddress(procname);
+}
+
+EGLBoolean eglChooseConfig(EGLDisplay dpy, const EGLint *attrib_list, EGLConfig *configs,
+                           EGLint config_size, EGLint *num_config)
+{
+    if (!load_present_egl())
+        return EGL_FALSE;
+    return present.ChooseConfig(dpy, attrib_list, configs, config_size, num_config);
+}
+
+EGLContext eglCreateContext(EGLDisplay dpy, EGLConfig config, EGLContext share_context,
+                            const EGLint *attrib_list)
+{
+    if (!load_present_egl())
+        return EGL_NO_CONTEXT;
+    return present.CreateContext(dpy, config, share_context, attrib_list);
+}
+
+EGLBoolean eglDestroyContext(EGLDisplay dpy, EGLContext ctx)
+{
+    if (!load_present_egl())
+        return EGL_FALSE;
+    return present.DestroyContext(dpy, ctx);
+}
+
+EGLSurface eglCreatePbufferSurface(EGLDisplay dpy, EGLConfig config, const EGLint *attrib_list)
+{
+    if (!load_present_egl())
+        return EGL_NO_SURFACE;
+    return present.CreatePbufferSurface(dpy, config, attrib_list);
+}
+
+EGLSurface eglCreateWindowSurface(EGLDisplay dpy, EGLConfig config, EGLNativeWindowType win,
+                                  const EGLint *attrib_list)
+{
+    if (!load_present_egl())
+        return EGL_NO_SURFACE;
+    return present.CreateWindowSurface(dpy, config, win, attrib_list);
+}
+
+EGLBoolean eglDestroySurface(EGLDisplay dpy, EGLSurface surface)
+{
+    if (!load_present_egl())
+        return EGL_FALSE;
+    return present.DestroySurface(dpy, surface);
+}
+
+EGLBoolean eglMakeCurrent(EGLDisplay dpy, EGLSurface draw, EGLSurface read, EGLContext ctx)
+{
+    if (!load_present_egl())
+        return EGL_FALSE;
+    return present.MakeCurrent(dpy, draw, read, ctx);
+}
+
+EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface)
+{
+    if (!load_present_egl())
+        return EGL_FALSE;
+    return present.SwapBuffers(dpy, surface);
+}
+
+EGLBoolean eglSwapInterval(EGLDisplay dpy, EGLint interval)
+{
+    if (!load_present_egl())
+        return EGL_FALSE;
+    return present.SwapInterval(dpy, interval);
+}
+
+const char *eglQueryString(EGLDisplay dpy, EGLint name)
+{
+    if (!load_present_egl())
+        return NULL;
+    return present.QueryString(dpy, name);
+}
+
+EGLBoolean eglGetConfigAttrib(EGLDisplay dpy, EGLConfig config, EGLint attribute, EGLint *value)
+{
+    if (!load_present_egl())
+        return EGL_FALSE;
+    return present.GetConfigAttrib(dpy, config, attribute, value);
+}
+
+EGLBoolean eglWaitNative(EGLint engine)
+{
+    if (!load_present_egl())
+        return EGL_FALSE;
+    return present.WaitNative(engine);
+}
+
+EGLBoolean eglWaitGL(void)
+{
+    if (!load_present_egl())
+        return EGL_FALSE;
+    return present.WaitGL();
+}
+
+EGLBoolean eglBindAPI(EGLenum api)
+{
+    if (!load_present_egl())
+        return EGL_FALSE;
+    return present.BindAPI(api);
+}
+
+EGLint eglGetError(void)
+{
+    if (!load_present_egl())
+        return EGL_NOT_INITIALIZED;
+    return present.GetError();
+}
+
+EGLImageKHR eglCreateImageKHR(EGLDisplay dpy, EGLContext ctx, EGLenum target,
+                              EGLClientBuffer buffer, const EGLint *attrib_list)
+{
+    if (!load_present_egl() || !present.CreateImageKHR)
+        return EGL_NO_IMAGE_KHR;
+    return present.CreateImageKHR(dpy, ctx, target, buffer, attrib_list);
+}
+
+EGLBoolean eglDestroyImageKHR(EGLDisplay dpy, EGLImageKHR image)
+{
+    if (!load_present_egl() || !present.DestroyImageKHR)
+        return EGL_FALSE;
+    return present.DestroyImageKHR(dpy, image);
+}
+
+EGLBoolean eglReleaseThread(void)
+{
+    if (!load_present_egl() || !present.ReleaseThread)
+        return EGL_TRUE;
+    return present.ReleaseThread();
+}
+
+EGLContext eglGetCurrentContext(void)
+{
+    if (!load_present_egl() || !present.GetCurrentContext)
+        return EGL_NO_CONTEXT;
+    return present.GetCurrentContext();
+}
+
+EGLSurface eglGetCurrentSurface(EGLint readdraw)
+{
+    if (!load_present_egl() || !present.GetCurrentSurface)
+        return EGL_NO_SURFACE;
+    return present.GetCurrentSurface(readdraw);
+}
+
+EGLDisplay eglGetCurrentDisplay(void)
+{
+    if (!load_present_egl() || !present.GetCurrentDisplay)
+        return EGL_NO_DISPLAY;
+    return present.GetCurrentDisplay();
 }

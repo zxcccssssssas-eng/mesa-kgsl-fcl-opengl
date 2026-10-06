@@ -16,10 +16,17 @@
  *
  * Both paths use FIFO presentation.  The zero-copy path keeps frame pacing
  * (this is the Android presentation queue, not the render loop).
+ *
+ * libvulkan is not a DT_NEEDED of this DSO. The default EGL presentation
+ * path does not need a Vulkan loader; open the system loader only when this
+ * presenter starts. FCL separately owns the game's SDL/LWJGL loader routing.
+ * This does not by itself make their vkGetInstanceProcAddr pointers equal.
  */
 #define VK_USE_PLATFORM_ANDROID_KHR
+#define VK_NO_PROTOTYPES
 #include <vulkan/vulkan.h>
 #include <android/log.h>
+#include <dlfcn.h>
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
@@ -100,6 +107,199 @@ struct vk_present {
     int broken;
     int stale;      /* swapchain reported SUBOPTIMAL; rebuild once it really is */
 };
+
+
+/* VK_NO_PROTOTYPES: every vk* call goes through this table. A missing
+ * entry fails the compile instead of pulling libvulkan in as DT_NEEDED. */
+#define VK_EACH(M) \
+    M(vkAcquireNextImageKHR) \
+    M(vkAllocateCommandBuffers) \
+    M(vkAllocateDescriptorSets) \
+    M(vkAllocateMemory) \
+    M(vkBeginCommandBuffer) \
+    M(vkBindBufferMemory) \
+    M(vkBindImageMemory) \
+    M(vkCmdBeginRenderPass) \
+    M(vkCmdBindDescriptorSets) \
+    M(vkCmdBindPipeline) \
+    M(vkCmdCopyBufferToImage) \
+    M(vkCmdCopyImage) \
+    M(vkCmdDraw) \
+    M(vkCmdEndRenderPass) \
+    M(vkCmdPipelineBarrier) \
+    M(vkCmdPushConstants) \
+    M(vkCmdSetScissor) \
+    M(vkCmdSetViewport) \
+    M(vkCreateAndroidSurfaceKHR) \
+    M(vkCreateBuffer) \
+    M(vkCreateCommandPool) \
+    M(vkCreateDescriptorPool) \
+    M(vkCreateDescriptorSetLayout) \
+    M(vkCreateDevice) \
+    M(vkCreateFence) \
+    M(vkCreateFramebuffer) \
+    M(vkCreateGraphicsPipelines) \
+    M(vkCreateImage) \
+    M(vkCreateImageView) \
+    M(vkCreateInstance) \
+    M(vkCreatePipelineLayout) \
+    M(vkCreateRenderPass) \
+    M(vkCreateSampler) \
+    M(vkCreateSemaphore) \
+    M(vkCreateShaderModule) \
+    M(vkCreateSwapchainKHR) \
+    M(vkDestroyBuffer) \
+    M(vkDestroyCommandPool) \
+    M(vkDestroyDescriptorPool) \
+    M(vkDestroyDescriptorSetLayout) \
+    M(vkDestroyDevice) \
+    M(vkDestroyFence) \
+    M(vkDestroyFramebuffer) \
+    M(vkDestroyImage) \
+    M(vkDestroyImageView) \
+    M(vkDestroyInstance) \
+    M(vkDestroyPipeline) \
+    M(vkDestroyPipelineLayout) \
+    M(vkDestroyRenderPass) \
+    M(vkDestroySampler) \
+    M(vkDestroySemaphore) \
+    M(vkDestroyShaderModule) \
+    M(vkDestroySurfaceKHR) \
+    M(vkDestroySwapchainKHR) \
+    M(vkDeviceWaitIdle) \
+    M(vkEndCommandBuffer) \
+    M(vkEnumerateDeviceExtensionProperties) \
+    M(vkEnumeratePhysicalDevices) \
+    M(vkFreeMemory) \
+    M(vkGetBufferMemoryRequirements) \
+    M(vkGetDeviceProcAddr) \
+    M(vkGetDeviceQueue) \
+    M(vkGetImageMemoryRequirements) \
+    M(vkGetPhysicalDeviceMemoryProperties) \
+    M(vkGetPhysicalDeviceQueueFamilyProperties) \
+    M(vkGetPhysicalDeviceSurfaceCapabilitiesKHR) \
+    M(vkGetPhysicalDeviceSurfaceFormatsKHR) \
+    M(vkGetPhysicalDeviceSurfaceSupportKHR) \
+    M(vkGetSwapchainImagesKHR) \
+    M(vkMapMemory) \
+    M(vkQueuePresentKHR) \
+    M(vkQueueSubmit) \
+    M(vkResetCommandBuffer) \
+    M(vkResetFences) \
+    M(vkUpdateDescriptorSets) \
+    M(vkWaitForFences)
+
+static struct {
+#define VK_DECL(name) PFN_##name name;
+    VK_EACH(VK_DECL)
+#undef VK_DECL
+} vkfn;
+
+static int load_vulkan(void)
+{
+    static int done, ok;
+    void *lib;
+    if (done)
+        return ok;
+    done = 1;
+    lib = dlopen("libvulkan.so", RTLD_LOCAL | RTLD_NOW);
+    if (!lib) {
+        LOG("dlopen libvulkan.so failed: %s", dlerror());
+        return 0;
+    }
+#define VK_LOAD(name) \
+    do { \
+        vkfn.name = (PFN_##name)dlsym(lib, #name); \
+        if (!vkfn.name) { \
+            LOG("libvulkan.so missing %s", #name); \
+            dlclose(lib); \
+            memset(&vkfn, 0, sizeof(vkfn)); \
+            return 0; \
+        } \
+    } while (0);
+    VK_EACH(VK_LOAD)
+#undef VK_LOAD
+    ok = 1;
+    return 1;
+}
+#undef VK_EACH
+
+#define vkAcquireNextImageKHR vkfn.vkAcquireNextImageKHR
+#define vkAllocateCommandBuffers vkfn.vkAllocateCommandBuffers
+#define vkAllocateDescriptorSets vkfn.vkAllocateDescriptorSets
+#define vkAllocateMemory vkfn.vkAllocateMemory
+#define vkBeginCommandBuffer vkfn.vkBeginCommandBuffer
+#define vkBindBufferMemory vkfn.vkBindBufferMemory
+#define vkBindImageMemory vkfn.vkBindImageMemory
+#define vkCmdBeginRenderPass vkfn.vkCmdBeginRenderPass
+#define vkCmdBindDescriptorSets vkfn.vkCmdBindDescriptorSets
+#define vkCmdBindPipeline vkfn.vkCmdBindPipeline
+#define vkCmdCopyBufferToImage vkfn.vkCmdCopyBufferToImage
+#define vkCmdCopyImage vkfn.vkCmdCopyImage
+#define vkCmdDraw vkfn.vkCmdDraw
+#define vkCmdEndRenderPass vkfn.vkCmdEndRenderPass
+#define vkCmdPipelineBarrier vkfn.vkCmdPipelineBarrier
+#define vkCmdPushConstants vkfn.vkCmdPushConstants
+#define vkCmdSetScissor vkfn.vkCmdSetScissor
+#define vkCmdSetViewport vkfn.vkCmdSetViewport
+#define vkCreateAndroidSurfaceKHR vkfn.vkCreateAndroidSurfaceKHR
+#define vkCreateBuffer vkfn.vkCreateBuffer
+#define vkCreateCommandPool vkfn.vkCreateCommandPool
+#define vkCreateDescriptorPool vkfn.vkCreateDescriptorPool
+#define vkCreateDescriptorSetLayout vkfn.vkCreateDescriptorSetLayout
+#define vkCreateDevice vkfn.vkCreateDevice
+#define vkCreateFence vkfn.vkCreateFence
+#define vkCreateFramebuffer vkfn.vkCreateFramebuffer
+#define vkCreateGraphicsPipelines vkfn.vkCreateGraphicsPipelines
+#define vkCreateImage vkfn.vkCreateImage
+#define vkCreateImageView vkfn.vkCreateImageView
+#define vkCreateInstance vkfn.vkCreateInstance
+#define vkCreatePipelineLayout vkfn.vkCreatePipelineLayout
+#define vkCreateRenderPass vkfn.vkCreateRenderPass
+#define vkCreateSampler vkfn.vkCreateSampler
+#define vkCreateSemaphore vkfn.vkCreateSemaphore
+#define vkCreateShaderModule vkfn.vkCreateShaderModule
+#define vkCreateSwapchainKHR vkfn.vkCreateSwapchainKHR
+#define vkDestroyBuffer vkfn.vkDestroyBuffer
+#define vkDestroyCommandPool vkfn.vkDestroyCommandPool
+#define vkDestroyDescriptorPool vkfn.vkDestroyDescriptorPool
+#define vkDestroyDescriptorSetLayout vkfn.vkDestroyDescriptorSetLayout
+#define vkDestroyDevice vkfn.vkDestroyDevice
+#define vkDestroyFence vkfn.vkDestroyFence
+#define vkDestroyFramebuffer vkfn.vkDestroyFramebuffer
+#define vkDestroyImage vkfn.vkDestroyImage
+#define vkDestroyImageView vkfn.vkDestroyImageView
+#define vkDestroyInstance vkfn.vkDestroyInstance
+#define vkDestroyPipeline vkfn.vkDestroyPipeline
+#define vkDestroyPipelineLayout vkfn.vkDestroyPipelineLayout
+#define vkDestroyRenderPass vkfn.vkDestroyRenderPass
+#define vkDestroySampler vkfn.vkDestroySampler
+#define vkDestroySemaphore vkfn.vkDestroySemaphore
+#define vkDestroyShaderModule vkfn.vkDestroyShaderModule
+#define vkDestroySurfaceKHR vkfn.vkDestroySurfaceKHR
+#define vkDestroySwapchainKHR vkfn.vkDestroySwapchainKHR
+#define vkDeviceWaitIdle vkfn.vkDeviceWaitIdle
+#define vkEndCommandBuffer vkfn.vkEndCommandBuffer
+#define vkEnumerateDeviceExtensionProperties vkfn.vkEnumerateDeviceExtensionProperties
+#define vkEnumeratePhysicalDevices vkfn.vkEnumeratePhysicalDevices
+#define vkFreeMemory vkfn.vkFreeMemory
+#define vkGetBufferMemoryRequirements vkfn.vkGetBufferMemoryRequirements
+#define vkGetDeviceProcAddr vkfn.vkGetDeviceProcAddr
+#define vkGetDeviceQueue vkfn.vkGetDeviceQueue
+#define vkGetImageMemoryRequirements vkfn.vkGetImageMemoryRequirements
+#define vkGetPhysicalDeviceMemoryProperties vkfn.vkGetPhysicalDeviceMemoryProperties
+#define vkGetPhysicalDeviceQueueFamilyProperties vkfn.vkGetPhysicalDeviceQueueFamilyProperties
+#define vkGetPhysicalDeviceSurfaceCapabilitiesKHR vkfn.vkGetPhysicalDeviceSurfaceCapabilitiesKHR
+#define vkGetPhysicalDeviceSurfaceFormatsKHR vkfn.vkGetPhysicalDeviceSurfaceFormatsKHR
+#define vkGetPhysicalDeviceSurfaceSupportKHR vkfn.vkGetPhysicalDeviceSurfaceSupportKHR
+#define vkGetSwapchainImagesKHR vkfn.vkGetSwapchainImagesKHR
+#define vkMapMemory vkfn.vkMapMemory
+#define vkQueuePresentKHR vkfn.vkQueuePresentKHR
+#define vkQueueSubmit vkfn.vkQueueSubmit
+#define vkResetCommandBuffer vkfn.vkResetCommandBuffer
+#define vkResetFences vkfn.vkResetFences
+#define vkUpdateDescriptorSets vkfn.vkUpdateDescriptorSets
+#define vkWaitForFences vkfn.vkWaitForFences
 
 /* ------------------------------------------------------------------ */
 /* swapchain                                                          */
@@ -822,8 +1022,11 @@ fail:
 
 struct vk_present *vk_present_create(ANativeWindow *window)
 {
-    struct vk_present *p = calloc(1, sizeof(*p));
+    struct vk_present *p;
     VkPhysicalDevice *gpus = NULL;
+    if (!load_vulkan())
+        return NULL;
+    p = calloc(1, sizeof(*p));
     if (!p) return NULL;
     p->window = window;
     ANativeWindow_acquire(window);

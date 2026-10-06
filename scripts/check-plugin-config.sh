@@ -50,7 +50,9 @@ check "extractNativeLibs is true" grep -q 'android:extractNativeLibs="true"' "${
 
 check "applicationIdSuffix is .freedreno.kgsl" grep -q 'applicationIdSuffix = ".freedreno.kgsl"' "${gradle}"
 check "plugin minSdk is 29" grep -q 'minSdk = 29' "${gradle}"
-check "renderer id is FreedrenoKGSL EGL/GLES mesa" grep -q 'FreedrenoKGSL:libGLESv2_mesa.so:/libEGL_mesa.so' "${gradle}"
+check "renderer id is FreedrenoKGSL EGL/GLES mesa" grep -q 'FreedrenoKGSL:libGLESv2_mesa.so:libEGL_mesa.so' "${gradle}"
+check "renderer EGL name has no leading slash" \
+  bash -c "! grep -q 'libGLESv2_mesa.so:/libEGL_mesa.so' '${gradle}'"
 check "GALLIUM_DRIVER=freedreno" grep -q '"GALLIUM_DRIVER" to "freedreno"' "${gradle}"
 check "MESA_LOADER_DRIVER_OVERRIDE=kgsl" grep -q '"MESA_LOADER_DRIVER_OVERRIDE" to "kgsl"' "${gradle}"
 check "POJAV_RENDERER=opengles3_desktopgl" grep -q '"POJAV_RENDERER" to "opengles3_desktopgl"' "${gradle}"
@@ -88,12 +90,32 @@ check "GLES entry-point shim source present" \
   test -f "${ROOT}/app/src/main/cpp/gles_shim.c"
 check "GLES shim exports glXGetProcAddress" \
   grep -q 'glXGetProcAddress' "${ROOT}/app/src/main/cpp/gles_shim.c"
+check "GLES shim forwards EGL to libEGL_mesa.so" \
+  grep -q 'libEGL_mesa.so' "${ROOT}/app/src/main/cpp/gles_shim.c"
+check "GLES shim exports eglGetDisplay" \
+  grep -q 'EGLDisplay eglGetDisplay' "${ROOT}/app/src/main/cpp/gles_shim.c"
+check "GLES shim exports eglChooseConfig" \
+  grep -q 'EGLBoolean eglChooseConfig' "${ROOT}/app/src/main/cpp/gles_shim.c"
+check "libEGL_mesa is not linked against libvulkan" \
+  bash -c "! grep -q 'target_link_libraries(EGL_mesa PRIVATE nativewindow log dl vulkan)' '${ROOT}/app/src/main/cpp/CMakeLists.txt'"
+check "vulkan presenter dlopens libvulkan.so locally" \
+  grep -Fq 'dlopen("libvulkan.so", RTLD_LOCAL | RTLD_NOW)' "${ROOT}/app/src/main/cpp/vulkan_present.c"
+check "GLES shim EGL forwarders" \
+  bash "${ROOT}/scripts/test-gles-egl-exports.sh"
 check "build script renames Mesa GLES for the shim" \
   grep -q 'libGLESv2_mesa_core.so' "${ROOT}/scripts/build-mesa-android.sh"
 check "build script enables EGL_OPENGL_API on Android" \
   grep -q 'patch_mesa_android_desktopgl' "${ROOT}/scripts/build-mesa-android.sh"
 check "desktop GL patch touches _eglIsApiValid" \
   grep -q 'eglcurrent.h' "${ROOT}/scripts/build-mesa-android.sh"
+check "CI reuses Mesa jniLibs when the NDK job is skipped" \
+  grep -q 'Reuse Mesa native libs from last successful build' "${ROOT}/.github/workflows/build.yml"
+check "CI verifies real Mesa payload before publishing APK" \
+  grep -q 'require-mesa-payload.sh' "${ROOT}/.github/workflows/build.yml"
+check "CI does not name the plugin artifact as a stub APK" \
+  bash -c "! grep -q 'NAME=\"FCL-FreedrenoKGSL-stub.apk\"' '${ROOT}/.github/workflows/build.yml'"
+check "require-mesa-payload script is executable" \
+  test -x "${ROOT}/scripts/require-mesa-payload.sh"
 
 # Probe Mesa 26-style meson.options: osmesa must not be emitted.
 mesa_probe_dir="$(mktemp -d)"
@@ -126,30 +148,14 @@ check "probed flags do not include osmesa" bash -c "[[ '${probe_flags}' != *osme
 if [[ "${1:-}" != "" ]]; then
   APK="$1"
   check "APK file exists" test -f "${APK}"
+  check "APK contains a real Mesa payload (not CMake stubs)" \
+    "${ROOT}/scripts/require-mesa-payload.sh" "${APK}"
   if command -v aapt >/dev/null 2>&1; then
     dump="$(aapt dump xmltree "${APK}" AndroidManifest.xml || true)"
     check "APK package is com.mio.plugin.renderer.freedreno.kgsl" \
       grep -q 'com.mio.plugin.renderer.freedreno.kgsl' <<<"${dump}"
     check "APK contains fclPlugin meta-data" grep -q 'fclPlugin' <<<"${dump}"
     check "APK contains FreedrenoKGSL renderer string" grep -q 'FreedrenoKGSL' <<<"${dump}"
-  elif command -v python3 >/dev/null 2>&1; then
-    python3 - "${APK}" <<'PY'
-import sys, zipfile
-z = zipfile.ZipFile(sys.argv[1])
-names = z.namelist()
-need = [
-    "lib/arm64-v8a/libEGL_mesa.so",
-    "lib/arm64-v8a/libGLESv2_mesa.so",
-    "lib/arm64-v8a/libgallium_dri.so",
-    "lib/arm64-v8a/libfreedreno_kgsl_init.so",
-]
-missing = [n for n in need if n not in names]
-if missing:
-    print("missing native libs:", missing)
-    sys.exit(1)
-print("apk native libs ok:", [n for n in names if n.startswith("lib/")])
-PY
-    check "APK contains arm64 EGL_mesa + GLESv2_mesa + gallium_dri" true
   fi
 fi
 

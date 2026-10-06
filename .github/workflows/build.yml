@@ -22,6 +22,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -32,6 +33,20 @@ env:
   NDK_VERSION: "27.2.12479018"
 
 jobs:
+  shim-tests:
+    name: EGL loader and real Mesa context tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install host Mesa and Vulkan headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc libegl1-mesa-dev libgl1-mesa-dri libvulkan-dev
+      - name: Test exports, state and desktop/ES contexts
+        run: |
+          bash scripts/test-gles-egl-exports.sh
+          bash scripts/test-sdl-desktop-context.sh
+
   mesa-ndk:
     name: Mesa NDK (arm64 Freedreno KGSL)
     if: >
@@ -98,7 +113,7 @@ jobs:
           name: mesa-jniLibs-arm64-v8a
           path: app/src/main/jniLibs/arm64-v8a/*.so
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 30
 
       - name: Upload AdrenoTools zip (if Turnip was produced)
         uses: actions/upload-artifact@v4
@@ -106,13 +121,16 @@ jobs:
           name: turnip-adrenotools-zip
           path: dist/*.zip
           if-no-files-found: ignore
-          retention-days: 14
+          retention-days: 30
 
   apk:
     name: FCL Renderer Plugin APK
     runs-on: ubuntu-latest
-    needs: [mesa-ndk]
-    if: always() && (needs.mesa-ndk.result == 'success' || needs.mesa-ndk.result == 'skipped')
+    needs: [shim-tests, mesa-ndk]
+    if: >
+      always()
+      && needs.shim-tests.result == 'success'
+      && (needs.mesa-ndk.result == 'success' || needs.mesa-ndk.result == 'skipped')
     steps:
       - uses: actions/checkout@v4
 
@@ -145,6 +163,47 @@ jobs:
           name: mesa-jniLibs-arm64-v8a
           path: app/src/main/jniLibs/arm64-v8a
 
+      - name: Reuse Mesa native libs from last successful build
+        if: needs.mesa-ndk.result != 'success'
+        id: reuse_mesa
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          RUN_ID="$(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=mesa-jniLibs-arm64-v8a&per_page=20" \
+            --jq '[.artifacts[] | select(.expired == false)] | first | .workflow_run.id // empty')"
+          if [[ -z "${RUN_ID}" ]]; then
+            echo "error: no unexpired mesa-jniLibs-arm64-v8a artifact."
+            echo "Push to main or use workflow_dispatch with build_mesa enabled."
+            exit 1
+          fi
+          echo "Using mesa-jniLibs-arm64-v8a from run ${RUN_ID}"
+          echo "run_id=${RUN_ID}" >> "${GITHUB_OUTPUT}"
+
+      - name: Download reused Mesa native libs
+        if: needs.mesa-ndk.result != 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: mesa-jniLibs-arm64-v8a
+          path: app/src/main/jniLibs/arm64-v8a
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.reuse_mesa.outputs.run_id }}
+
+      - name: Require real Mesa jniLibs
+        run: |
+          chmod +x scripts/*.sh
+          DEST=app/src/main/jniLibs/arm64-v8a
+          mkdir -p "${DEST}"
+          if [[ ! -f "${DEST}/libEGL_mesa_core.so" ]]; then
+            found="$(find "${DEST}" -name 'libEGL_mesa_core.so' | head -n1 || true)"
+            if [[ -n "${found}" ]]; then
+              mv "$(dirname "${found}")"/*.so "${DEST}/"
+            fi
+          fi
+          ./scripts/require-mesa-payload.sh "${DEST}"
+          ls -lh "${DEST}"
+
       - name: Check plugin config
         run: |
           chmod +x scripts/*.sh
@@ -160,15 +219,13 @@ jobs:
           APK=$(find app/build/outputs/apk -name '*.apk' | head -n1)
           test -n "${APK}"
           mkdir -p dist
-          if [[ "${{ needs.mesa-ndk.result }}" == "success" ]]; then
-            NAME="FCL-FreedrenoKGSL-arm64.apk"
-          else
-            NAME="FCL-FreedrenoKGSL-stub.apk"
-          fi
+          NAME="FCL-FreedrenoKGSL-arm64.apk"
           cp "${APK}" "dist/${NAME}"
           echo "APK=${PWD}/dist/${NAME}" >> "$GITHUB_ENV"
-          unzip -l "dist/${NAME}" | grep -E 'lib/arm64-v8a/lib(EGL_mesa|GLESv2_mesa|gallium_dri|freedreno_kgsl_init)\.so'
+          unzip -l "dist/${NAME}"
+          ./scripts/require-mesa-payload.sh "dist/${NAME}"
           ./scripts/check-plugin-config.sh "dist/${NAME}"
+          test ! -f dist/FCL-FreedrenoKGSL-stub.apk
           ls -lh dist/
 
       - name: Download AdrenoTools zip
@@ -178,6 +235,17 @@ jobs:
         with:
           name: turnip-adrenotools-zip
           path: dist
+
+      - name: Reuse AdrenoTools zip from last Mesa build
+        if: needs.mesa-ndk.result != 'success'
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: turnip-adrenotools-zip
+          path: dist
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.reuse_mesa.outputs.run_id }}
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
