@@ -4,7 +4,7 @@ An **installable FoldCraftLauncher (FCL) renderer plugin** for Minecraft Java on
 
 Install the APK like a normal Android app. FoldCraftLauncher finds it automatically and lists **Freedreno KGSL** in its renderer menu. You do **not** unpack Mesa libraries by hand.
 
-Current plugin version: **1.5.4**. Mesa inside the plugin is **26.3.0-devel**.
+Current plugin version: **1.5.5**. Mesa inside the plugin is **26.3.0-devel**.
 
 > This is an Android plugin, not a Linux container Mesa tarball. For Debian/Ubuntu/Fedora-style arm64 userspace, use [lfdevs/mesa-for-android-container](https://github.com/lfdevs/mesa-for-android-container) instead.
 
@@ -40,9 +40,7 @@ There is no GitHub Release yet. Download a CI artifact:
 2. Open the workflow **Build FCL Freedreno KGSL plugin**
 3. Use a successful run on `main`, or click **Run workflow** (leave Mesa build enabled) and wait — the native compile is long
 4. Download the artifact **`fcl-freedreno-kgsl-apk`**
-5. Use **`FCL-FreedrenoKGSL-arm64.apk`**
-
-Skip `FCL-FreedrenoKGSL-stub.apk`. The stub only exists so pull-request CI can assemble an APK without compiling Mesa. It is **not** a working renderer.
+5. Use **`FCL-FreedrenoKGSL-arm64.apk`** (about 11 MB). Pull-request runs reuse the last Mesa libraries from `main` and still publish this full plugin, not an empty stub.
 
 ### 2. Install it on the device
 
@@ -154,9 +152,9 @@ Always **force-stop FCL** after installing or updating this plugin, then try aga
 
 | What you see | What to try |
 |---|---|
-| Renderer is missing from FCL | Confirm the APK is installed on the same user as FCL. Update FCL. Do not use the stub APK. |
+| Renderer is missing from FCL | Confirm the APK is installed on the same user as FCL. Update FCL. Use the full `FCL-FreedrenoKGSL-arm64.apk`, not an old stub. |
 | Game fails right after a plugin update | Force-stop FCL so it picks up the new library path. |
-| `Failed to dynamically load library` / `libGLESv2_mesa.so` | Same as above, or you installed the stub APK. Need a full Mesa build (plugin **1.2.3+**). |
+| `Failed to dynamically load library` / `libGLESv2_mesa.so` | Same as above, or you installed an old stub APK. Need a full Mesa build (plugin **1.2.3+**). |
 | `eglInitialize` failed / GLFW cannot create a window | Use plugin **1.2.4+**. Confirm the device is Adreno + KGSL. |
 | `EGL_BAD_PARAMETER` / no desktop OpenGL | Use a current plugin (desktop GL on Android is patched in). |
 | NeoForge GLFW profile error | `earlyWindowControl=false` in `config/fml.toml`; see above. |
@@ -199,7 +197,7 @@ POJAV_RENDERER=opengles3_desktopgl
 
 Build, Mesa flags, patch notes, and architecture live in the original README: **[`README.md.bak`](README.md.bak)**.
 
-**CI (recommended):** GitHub Actions → **Build FCL Freedreno KGSL plugin** → **Run workflow** with `build_mesa=true`. Pull requests assemble a **stub** APK on purpose.
+**CI (recommended):** GitHub Actions → **Build FCL Freedreno KGSL plugin** → **Run workflow** with `build_mesa=true`. Pull requests reuse the last Mesa `jniLibs` artifact from `main` and assemble a **full** plugin APK. CI refuses to publish the old empty stub.
 
 **Local (needs Android SDK, NDK r27+, meson, ninja, pkg-config, python3-mako, git, zip):**
 

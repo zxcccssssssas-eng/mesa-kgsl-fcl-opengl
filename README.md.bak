@@ -191,7 +191,7 @@ The Turnip AdrenoTools zip is an optional separate artifact for people who want 
 Actions workflow `.github/workflows/build.yml`:
 
 - `workflow_dispatch` is enabled. **Run workflow** with `build_mesa=true` (default) to compile Mesa with the NDK and produce a usable APK.
-- Pull requests assemble a **stub** APK (plugin metadata + placeholder `libEGL_mesa.so` / `libGLESv2_mesa.so` / `libgallium_dri.so`) so Gradle stays green without a 1 hour Mesa compile. The stub is **not** a working renderer.
+- Pull requests reuse the last unexpired `mesa-jniLibs-arm64-v8a` artifact from a successful Mesa NDK job and assemble a **full** plugin APK. CI refuses to publish the old empty stub (`require-mesa-payload.sh` checks for `libEGL_mesa_core.so` / `libgallium_dri.so` size floors).
 
 Dispatch inputs:
 
